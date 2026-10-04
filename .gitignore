@@ -1,0 +1,44 @@
+# Keil build output
+**/Objects/
+**/Listings/
+**/*.axf
+**/*.elf
+**/*.hex
+**/*.bin
+**/*.map
+**/*.htm
+**/*.lnp
+**/*.dep
+**/*.crf
+**/*.d
+**/*.o
+**/*.sct
+
+# Keil user-specific files and logs
+*.uvguix.*
+*.uvoptx
+*.bak
+*.log
+*.scvd
+*.dbgconf
+*.dbgconf.*
+*.lock
+
+# Keep the Keil project definition
+!**/*.uvprojx
+
+# VS Code user-specific settings and logs
+.vscode/*
+!.vscode/c_cpp_properties.json
+!.vscode/tasks.json
+!.vscode/launch.json
+*.code-workspace
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# CubeMX backup files
+*.ioc.backup
+*.ioc.bak
