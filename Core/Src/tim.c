@@ -27,6 +27,9 @@
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim6;
 
+/* TIM1_CH1：舵机 PWM。
+ * TIM6：运动控制基础节拍，更新频率由 Prescaler 和 Period 决定，
+ * 其周期回调中会产生步进脉冲并累计任务超时。 */
 /* TIM1 init function */
 void MX_TIM1_Init(void)
 {

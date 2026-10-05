@@ -20,6 +20,8 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "stm32f4xx_it.h"
+#include "stepper_motor.h"
+#include "sorting_task.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 /* USER CODE END Includes */
@@ -188,6 +190,7 @@ void SysTick_Handler(void)
   /* USER CODE BEGIN SysTick_IRQn 0 */
 
   /* USER CODE END SysTick_IRQn 0 */
+  /* HAL 时基；业务节拍使用 TIM6，避免与 HAL 延时基准混用。 */
   HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
 
@@ -258,5 +261,15 @@ void TIM6_DAC_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim->Instance == TIM6)
+  {
+    /* TIM6 是运动控制节拍：先更新电机，再更新状态机计时。 */
+    StepperMotor_Tick();
+    SortingTask_Tick();
+  }
+}
 
 /* USER CODE END 1 */

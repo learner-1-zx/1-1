@@ -4,6 +4,9 @@
             "name": "diankong",
             "includePath": [
                 "d:\\project\\zhineng-fenlian\\diankong\\Core\\Inc",
+                "d:\\project\\zhineng-fenlian\\diankong\\App",
+                "d:\\project\\zhineng-fenlian\\diankong\\Service",
+                "d:\\project\\zhineng-fenlian\\diankong\\Drivers",
                 "d:\\project\\zhineng-fenlian\\diankong\\Drivers\\STM32F4xx_HAL_Driver\\Inc",
                 "d:\\project\\zhineng-fenlian\\diankong\\Drivers\\STM32F4xx_HAL_Driver\\Inc\\Legacy",
                 "d:\\project\\zhineng-fenlian\\diankong\\Drivers\\CMSIS\\Device\\ST\\STM32F4xx\\Include",

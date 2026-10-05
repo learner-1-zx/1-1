@@ -57,6 +57,7 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+/* 步进电机控制信号：每个轴由 DIR、EN 和 STEP 三根线组成。 */
 #define X_DIR_Pin GPIO_PIN_0
 #define X_DIR_GPIO_Port GPIOC
 #define Y_DIR_Pin GPIO_PIN_1
@@ -92,6 +93,7 @@ void Error_Handler(void);
 #define T_STEP_Pin GPIO_PIN_6
 #define T_STEP_GPIO_Port GPIOB
 
+/* 传感器输入均在 gpio.c 中配置为上拉，低电平表示触发。 */
 /* USER CODE BEGIN Private defines */
 
 /* USER CODE END Private defines */

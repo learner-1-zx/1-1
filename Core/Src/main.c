@@ -22,7 +22,24 @@
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
+#include "protocol.h"
+#include "safety_manager.h"
+#include "sorting_task.h"
+#include "stepper_motor.h"
+#include "servo_gripper.h"
 
+/*
+ * 工程分层：
+ *   Core  - STM32 HAL、时钟、GPIO、定时器、串口和中断入口；
+ *   Drivers - 步进电机和舵机等硬件抽象；
+ *   Service - 通信协议和安全输入管理；
+ *   App   - 分拣任务状态机。
+ *
+ * 运行模型：
+ *   主循环负责协议解析、安全轮询和任务状态迁移；
+ *   TIM6 中断负责固定节拍的步进脉冲和任务计时；
+ *   USART2 接收中断只搬运字节，不在中断中执行耗时业务。
+ */
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -87,7 +104,7 @@ int main(void)
 
   /* USER CODE END SysInit */
 
-  /* Initialize all configured peripherals */
+  /* 初始化顺序：底层 HAL/外设先完成，再启动应用模块和周期中断。 */
   MX_GPIO_Init();
   MX_TIM1_Init();
   MX_USART2_UART_Init();
@@ -95,13 +112,22 @@ int main(void)
   MX_ADC1_Init();
   MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
-
+  StepperMotor_Init();
+  ServoGripper_Init();
+  SafetyManager_Init();
+  SortingTask_Init();
+  Protocol_Init();
+  HAL_TIM_Base_Start_IT(&htim6);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    /* 所有函数都应保持非阻塞，步进脉冲由 TIM6 中断统一调度。 */
+    Protocol_Process();
+    SafetyManager_Process();
+    SortingTask_Process();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

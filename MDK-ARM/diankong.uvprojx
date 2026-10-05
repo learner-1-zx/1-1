@@ -339,7 +339,7 @@
               <MiscControls></MiscControls>
               <Define>USE_HAL_DRIVER,STM32F407xx,STM32_THREAD_SAFE_STRATEGY=2</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include</IncludePath>
+              <IncludePath>../Core/Inc;../App;../Service;../Drivers;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -392,6 +392,46 @@
               <FileName>armlib_lock_glue.c</FileName>
               <FileType>1</FileType>
               <FilePath>armlib_lock_glue.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>Application/User/App</GroupName>
+          <Files>
+            <File>
+              <FileName>sorting_task.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../App/sorting_task.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>Application/User/Service</GroupName>
+          <Files>
+            <File>
+              <FileName>protocol.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Service/protocol.c</FilePath>
+            </File>
+            <File>
+              <FileName>safety_manager.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Service/safety_manager.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>Application/User/Drivers</GroupName>
+          <Files>
+            <File>
+              <FileName>stepper_motor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Drivers/stepper_motor.c</FilePath>
+            </File>
+            <File>
+              <FileName>servo_gripper.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Drivers/servo_gripper.c</FilePath>
             </File>
           </Files>
         </Group>
