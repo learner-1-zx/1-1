@@ -17,8 +17,13 @@ typedef enum
 void StepperMotor_Init(void);
 /* 产生一个步进脉冲；应由固定周期的定时器中断调用。 */
 void StepperMotor_Tick(void);
-/* 立即停止所有轴，并保持当前位置作为新的目标位置。 */
+/* 设置指定轴每隔多少个 TIM6 节拍输出一个步进脉冲。 */
+void StepperMotor_SetStepInterval(StepperAxis_t axis, uint16_t interval);
+/* 立即停止所有轴，并关闭全部驱动器使能。 */
 void StepperMotor_StopAll(void);
+/* 立即停止指定轴并保持当前位置，但不关闭驱动器使能，
+ * 用于利用保持力矩防止停机后滑移，便于核对定位精度。 */
+void StepperMotor_HoldStop(StepperAxis_t axis);
 /* 设置绝对步数目标，函数本身不等待运动完成。 */
 HAL_StatusTypeDef StepperMotor_MoveTo(StepperAxis_t axis, int32_t position);
 /* 查询轴是否仍有未完成的目标。 */

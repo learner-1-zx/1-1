@@ -12,16 +12,20 @@ typedef struct
   int32_t position;
   int32_t target;
   uint8_t busy;
+  uint16_t step_interval;
+  uint16_t tick_count;
+  uint8_t pulse_high;
+  uint8_t step_active_low;
 } StepperMotor_t;
 
 static StepperMotor_t motors[STEPPER_COUNT] =
 {
   {X_STEP_GPIO_Port, X_STEP_Pin, X_DIR_GPIO_Port, X_DIR_Pin,
-   X_EN_GPIO_Port, X_EN_Pin, 0, 0, 0},
+   X_EN_GPIO_Port, X_EN_Pin, 0, 0, 0, 1, 0, 0, 0},
   {Y_STEP_GPIO_Port, Y_STEP_Pin, Y_DIR_GPIO_Port, Y_DIR_Pin,
-   Y_EN_GPIO_Port, Y_EN_Pin, 0, 0, 0},
+   Y_EN_GPIO_Port, Y_EN_Pin, 0, 0, 0, 1, 0, 0, 0},
   {T_STEP_GPIO_Port, T_STEP_Pin, T_DIR_GPIO_Port, T_DIR_Pin,
-   T_EN_GPIO_Port, T_EN_Pin, 0, 0, 0}
+   T_EN_GPIO_Port, T_EN_Pin, 0, 0, 0, 1, 0, 0, 1}
 };
 
 static void StepperMotor_SetEnable(StepperMotor_t *motor, uint8_t enable)
@@ -40,6 +44,12 @@ void StepperMotor_Init(void)
     motors[i].position = 0;
     motors[i].target = 0;
     motors[i].busy = 0;
+    motors[i].step_interval = 1;
+    motors[i].tick_count = 0;
+    motors[i].pulse_high = 0;
+    HAL_GPIO_WritePin(motors[i].step_port, motors[i].step_pin,
+                      motors[i].step_active_low
+                      ? GPIO_PIN_SET : GPIO_PIN_RESET);
     /* 上电默认关闭驱动，避免初始化期间电机误动作。 */
     StepperMotor_SetEnable(&motors[i], 0);
   }
@@ -55,8 +65,26 @@ HAL_StatusTypeDef StepperMotor_MoveTo(StepperAxis_t axis, int32_t position)
   /* 目标是绝对步数，不是相对位移；坐标原点由回零流程定义。 */
   motors[axis].target = position;
   motors[axis].busy = (motors[axis].position != position) ? 1U : 0U;
+  motors[axis].pulse_high = 0;
+  if (motors[axis].busy)
+  {
+    HAL_GPIO_WritePin(motors[axis].dir_port, motors[axis].dir_pin,
+                      (position > motors[axis].position)
+                      ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  }
   StepperMotor_SetEnable(&motors[axis], motors[axis].busy);
   return HAL_OK;
+}
+
+void StepperMotor_SetStepInterval(StepperAxis_t axis, uint16_t interval)
+{
+  if (axis >= STEPPER_COUNT)
+  {
+    return;
+  }
+
+  motors[axis].step_interval = (interval == 0U) ? 1U : interval;
+  motors[axis].tick_count = 0;
 }
 
 void StepperMotor_Tick(void)
@@ -71,19 +99,37 @@ void StepperMotor_Tick(void)
       continue;
     }
 
+    /* 保持有效脉冲一个完整 TIM6 周期，满足 TB6600 最小脉宽。 */
+    if (motors[i].pulse_high)
+    {
+      HAL_GPIO_WritePin(motors[i].step_port, motors[i].step_pin,
+                        motors[i].step_active_low
+                        ? GPIO_PIN_SET : GPIO_PIN_RESET);
+      motors[i].pulse_high = 0;
+      if (motors[i].position == motors[i].target)
+      {
+        motors[i].busy = 0;
+        StepperMotor_SetEnable(&motors[i], 0);
+      }
+      continue;
+    }
+
+    if (motors[i].tick_count + 1U < motors[i].step_interval)
+    {
+      ++motors[i].tick_count;
+      continue;
+    }
+    motors[i].tick_count = 0;
+
     /* 当前实现每个节拍每轴最多走一步，速度由 TIM6 周期决定。 */
     direction = (motors[i].target > motors[i].position)
                   ? GPIO_PIN_SET : GPIO_PIN_RESET;
-    HAL_GPIO_WritePin(motors[i].dir_port, motors[i].dir_pin, direction);
-    HAL_GPIO_WritePin(motors[i].step_port, motors[i].step_pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(motors[i].step_port, motors[i].step_pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(motors[i].step_port, motors[i].step_pin,
+                      motors[i].step_active_low
+                      ? GPIO_PIN_RESET : GPIO_PIN_SET);
+    motors[i].pulse_high = 1;
 
     motors[i].position += (direction == GPIO_PIN_SET) ? 1 : -1;
-    if (motors[i].position == motors[i].target)
-    {
-      motors[i].busy = 0;
-      StepperMotor_SetEnable(&motors[i], 0);
-    }
   }
 }
 
@@ -95,9 +141,29 @@ void StepperMotor_StopAll(void)
   {
     motors[i].target = motors[i].position;
     motors[i].busy = 0;
+    motors[i].pulse_high = 0;
     StepperMotor_SetEnable(&motors[i], 0);
-    HAL_GPIO_WritePin(motors[i].step_port, motors[i].step_pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(motors[i].step_port, motors[i].step_pin,
+                      motors[i].step_active_low
+                      ? GPIO_PIN_SET : GPIO_PIN_RESET);
   }
+}
+
+void StepperMotor_HoldStop(StepperAxis_t axis)
+{
+  if (axis >= STEPPER_COUNT)
+  {
+    return;
+  }
+
+  /* 立即结束剩余脉冲，但保持驱动器使能，让电机在原地保持力矩。 */
+  motors[axis].target = motors[axis].position;
+  motors[axis].busy = 0;
+  motors[axis].pulse_high = 0;
+  StepperMotor_SetEnable(&motors[axis], 1);
+  HAL_GPIO_WritePin(motors[axis].step_port, motors[axis].step_pin,
+                    motors[axis].step_active_low
+                    ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
 uint8_t StepperMotor_IsBusy(StepperAxis_t axis)

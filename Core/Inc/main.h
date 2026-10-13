@@ -68,6 +68,8 @@ void Error_Handler(void);
 #define X_EN_GPIO_Port GPIOC
 #define BAT_ADC_Pin GPIO_PIN_4
 #define BAT_ADC_GPIO_Port GPIOA
+#define TURNTABLE_TEST_KEY_Pin GPIO_PIN_0
+#define TURNTABLE_TEST_KEY_GPIO_Port GPIOA
 #define X_STEP_Pin GPIO_PIN_6
 #define X_STEP_GPIO_Port GPIOA
 #define Y_STEP_Pin GPIO_PIN_7

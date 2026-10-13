@@ -32,6 +32,16 @@ void SafetyManager_Process(void)
   }
 }
 
+void SafetyManager_ProcessTurntableTest(void)
+{
+  if (HAL_GPIO_ReadPin(EMERGENCY_STOP_GPIO_Port, EMERGENCY_STOP_Pin)
+      == GPIO_PIN_RESET)
+  {
+    fault = SAFETY_FAULT_EMERGENCY;
+    StepperMotor_StopAll();
+  }
+}
+
 uint8_t SafetyManager_IsSafe(void)
 {
   return fault == SAFETY_FAULT_NONE;

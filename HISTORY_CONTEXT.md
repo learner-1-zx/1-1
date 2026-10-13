@@ -1460,3 +1460,27 @@ MCU复位和初始化期间，所有电机必须默认关闭。
 11. PA0保留给KEY1，PB0避开板载LED。
 12. SWD、复位、BOOT和晶振相关引脚不能随意挪作普通外设。
 13. 所有未经实测的电流、电压、脉宽和机械尺寸都不能作为最终定稿参数。
+
+二十五、转盘电机单独测试模式
+
+当前调试阶段临时启用 PA0 作为转盘测试停止键，低电平有效；
+正式工程仍按本文件第十三节保留 PA0 给板载 KEY1/WK_UP。
+测试模式只驱动 T 轴（PB6 STEP、PC2 DIR、PC5 EN），
+上电后自动加速到指定速度持续转动，PA0 按下并稳定后立即停止。
+
+测试速度由 main.c 中的 TURNTABLE_TEST_SPEED_START_HZ 和
+TURNTABLE_TEST_SPEED_MAX_HZ 决定，TIM6 节拍为 20 kHz，
+分频值 STEP_INTERVAL = 20000 / SPEED_HZ。
+2026-10-13 竞速测试改造：由固定 400 steps/s 改为加速斜坡，
+从 200 steps/s 起步，每 20 ms 提升 25 steps/s，约 800 ms 到达 1200 steps/s；
+加斜坡是为了避免静止直接跳到高速造成丢步。
+寻找最佳速度时可在 Keil 监视 turntable_test_speed_hz，
+出现丢步或异响后把 TURNTABLE_TEST_SPEED_MAX_HZ 降到该速率以下。
+
+停止采用 StepperMotor_HoldStop()：立即停止脉冲但保留驱动器使能，
+用保持力矩防止停机后滑移，便于核对停机位置；
+停机时的软件步数和速率分别记录在
+turntable_test_stop_position 和 turntable_test_stop_speed_hz。
+急停仍由 SafetyManager 调用 StepperMotor_StopAll() 关闭使能，安全优先。
+
+测试完成后将 TURNTABLE_TEST_MODE 改回 0，恢复协议和分拣任务主循环。

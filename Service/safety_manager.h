@@ -15,6 +15,8 @@ typedef enum
 void SafetyManager_Init(void);
 /* 轮询急停和 X/Y 限位输入，发现故障立即停止电机。 */
 void SafetyManager_Process(void);
+/* T 轴单独测试时只监控急停，避免 X/Y 限位输入影响转盘测试。 */
+void SafetyManager_ProcessTurntableTest(void);
 /* 返回当前是否允许执行运动任务。 */
 uint8_t SafetyManager_IsSafe(void);
 /* 返回具体故障类型，便于状态上报和调试。 */
