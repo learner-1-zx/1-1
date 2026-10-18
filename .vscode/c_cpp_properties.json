@@ -1,0 +1,36 @@
+{
+    "configurations": [
+        {
+            "name": "STM32F407-Keil",
+            "includePath": [
+                "${workspaceFolder}/Core/Inc",
+                "${workspaceFolder}/Core/Src",
+                "${workspaceFolder}/App",
+                "${workspaceFolder}/Service",
+                "${workspaceFolder}/Drivers",
+                "${workspaceFolder}/Drivers/STM32F4xx_HAL_Driver/Inc",
+                "${workspaceFolder}/Drivers/STM32F4xx_HAL_Driver/Inc/Legacy",
+                "${workspaceFolder}/Drivers/CMSIS/Device/ST/STM32F4xx/Include",
+                "${workspaceFolder}/Drivers/CMSIS/Include"
+            ],
+            "defines": [
+                "USE_HAL_DRIVER",
+                "STM32F407xx",
+                "STM32_THREAD_SAFE_STRATEGY=2",
+                "__CC_ARM"
+            ],
+            "intelliSenseMode": "windows-gcc-x64",
+            "cStandard": "c11",
+            "browse": {
+                "path": [
+                    "${workspaceFolder}/Core/Inc",
+                    "${workspaceFolder}/App",
+                    "${workspaceFolder}/Service",
+                    "${workspaceFolder}/Drivers"
+                ],
+                "limitSymbolsToIncludedHeaders": true
+            }
+        }
+    ],
+    "version": 4
+}

@@ -6,6 +6,13 @@
 软件架构：裸机 HAL + 主循环状态机 + 定时器中断
 当前阶段：校赛原型机和 PCB 扩展板设计
 
+2026-10-18 状态更新：台架测试模式和夹爪上电自检已删除；Z 轴舵机由 PA8 / TIM1_CH1
+改到 PA1 / TIM2_CH2（拆除 PA1 板载 LED 后），夹爪舵机由 PD8 改到 PB8；
+PD8～PD11 中 PD8 重新释放，PD9～PD11 继续作为新增模块优先扩展口。
+板载测试按键为 PD0/KEY0、PD2/KEY2、PD3/KEY3、PD4/KEY4。当前以
+PROJECT_CONTEXT.md、IO.md 和源码为准，调试教训见 LESSONS.md；
+本文后续章节中的旧测试模式和旧引脚分配仅作历史记录。
+
 一、总体系统架构
 
 系统采用“视觉上位机决策 + STM32 下位机实时执行”的分层结构。
@@ -28,7 +35,7 @@ STM32F407VET6：
 4. 控制 A4988、TB6600 和 BDS300；
 5. 执行单个分拣任务；
 6. 检查限位、转盘零位、急停和运动超时；
-7. 通过 USART3 控制显示屏；
+7. 通过 SPI2 控制 ST7789V2 显示屏；
 8. 返回 ACK、BUSY、DONE 或 ERR 状态。
 
 STM32 不负责运行 YOLO 或复杂图像识别；
@@ -63,7 +70,7 @@ steps_per_mm =
 
 标称电压：11.1 V
 满电电压：12.6 V
-容量：2200 mAh
+容量：4000mAh
 标称放电倍率：30C
 
 电源结构：
@@ -430,13 +437,25 @@ T_EN         PC5
 
 SERVO_PWM    PA8 / TIM1_CH1
 
+Z_SERVO_PWM  PA1 / TIM2_CH2
+
 通信：
 
 VISION_TX   PA2 / USART2_TX
 VISION_RX   PA3 / USART2_RX
 
-DISPLAY_TX  PB10 / USART3_TX
-DISPLAY_RX  PB11 / USART3_RX
+USART3_TX   PB10（原串口屏方案已废弃，保留为调试串口）
+USART3_RX   PB11
+
+显示屏（SPI2 + ST7789V2，2026-10-14 起）：
+
+LCD_SCK     PB13 / SPI2_SCK
+LCD_MOSI    PB15 / SPI2_MOSI
+LCD_CS      PB12（软件片选，普通 GPIO）
+LCD_DC      PE7（命令 / 数据选择）
+LCD_RST     PE8（复位）
+LCD_BLK     PE9（背光）
+LCD_MISO    PB14 / SPI2_MISO（预留，当前只写不读）
 
 传感器和安全：
 
@@ -1192,7 +1211,8 @@ T_HOME：PD12
 
 4. 舵机
 
-SERVO_PWM：PA8 / TIM1_CH1
+SERVO_PWM：PA8 / TIM1_CH1（夹爪）
+Z_SERVO_PWM：PA1 / TIM2_CH2（Z轴）
 
 5. OpenART
 
@@ -1204,10 +1224,18 @@ VISION_RX：PA3 / USART2_RX
 STM32 PA2 → OpenART RX
 STM32 PA3 ← OpenART TX
 
-6. 显示屏
+6. 显示屏（2026-10-14 起改为 SPI 屏）
 
-DISPLAY_TX：PB10 / USART3_TX
-DISPLAY_RX：PB11 / USART3_RX
+LCD_SCK：PB13 / SPI2_SCK
+LCD_MOSI：PB15 / SPI2_MOSI
+LCD_CS：PB12（软件片选）
+LCD_DC：PE7
+LCD_RST：PE8
+LCD_BLK：PE9
+LCD_MISO：PB14（预留）
+
+ST7789V2 240 x 320 IPS，SPI Mode 0，初始约 5.25 MHz。
+USART3（PB10/PB11）不再驱动显示屏，保留为调试串口。
 
 7. 安全和传感器
 
@@ -1228,7 +1256,7 @@ GND：GND
 推荐引出：
 
 PD0～PD7
-PE7～PE15
+PE10～PE15（PE7、PE8、PE9 已给显示屏）
 PA5
 PB1
 3V3
@@ -1237,7 +1265,6 @@ GND
 
 用于后期增加：
 
-- Z轴；
 - 额外舵机；
 - 光电传感器；
 - 蜂鸣器；
@@ -1288,19 +1315,33 @@ PA3：RX
 PB10：TX
 PB11：RX
 初始配置同USART2。
+原串口显示屏方案已废弃，USART3不再承担显示通信。
 
 6. TIM1：
 
-PA8 / TIM1_CH1
-PWM频率：50 Hz
+PA8 / TIM1_CH1（夹爪舵机）
 Prescaler：167
 Period：1999
 计数分辨率：1 us
+初始Pulse：150
+
+注意：按上述配置TIM1实际周期为2 ms，即500 Hz，与早期设计文档中
+“50 Hz”的描述不一致，脉宽也使用100～200的计数值；
+BDS300实际可接受频率与脉宽范围必须空载测试后再定稿。
+
+7. TIM2：
+
+PA1 / TIM2_CH2（Z轴舵机）
+PWM频率：50 Hz
+Prescaler：83
+Period：19999
+计数分辨率：1 us
 初始Pulse：1500
 
-BDS300实际脉宽范围必须空载测试。
+TIM2位于APB1（42 MHz），分频后1 MHz计数时钟，
+周期20 ms，比较值即脉宽微秒数，软件限幅1000～2000 us。
 
-7. TIM6：
+8. TIM6：
 
 内部时钟
 Prescaler：83
@@ -1309,19 +1350,33 @@ Period：49
 
 TIM6用于统一调度三个步进轴。
 
-8. ADC1：
+9. ADC1：
 
 PA4 / ADC1_IN4
 12 bit
 软件触发
 采样时间84或112 cycles
 
-9. GPIO：
+10. GPIO：
 
 PA6、PA7、PB6：普通输出STEP
 PC0～PC5：普通输出DIR和EN
 PD8～PD14：输入，上拉
+PB12：输出，LCD_CS，初始高
+PE7：输出，LCD_DC，初始高
+PE8：输出，LCD_RST，初始高
+PE9：输出，LCD_BLK，初始低
 扩展口：暂时配置为普通GPIO
+
+11. SPI2：
+
+Mode：Master（全双工）
+Data Size：8 bit，MSB First
+CPOL = Low，CPHA = 1 Edge（SPI Mode 0）
+NSS：软件
+Prescaler：8（APB1 42 MHz / 8 ≈ 5.25 MHz）
+PB13：SCK；PB15：MOSI；PB14：MISO（预留）
+显示屏驱动：Drivers/lcd_st7789.c
 
 
 二十一、PCB设计原则
@@ -1436,13 +1491,15 @@ MCU复位和初始化期间，所有电机必须默认关闭。
 7. BDS300是否兼容3.3 V PWM；
 8. OpenART mini的具体摄像头型号；
 9. OpenART mini的实际供电电流；
-10. 显示屏的工作电压和最大电流；
+10. ST7789V2 SPI显示屏的工作电压和最大电流；
 11. 比赛是否允许3S LiPo；
 12. 物块是否存在严重堆叠；
-13. 是否最终需要Z轴；
+13. Z轴舵机的脉宽方向（1000 us 为上还是为下）与可用行程；
 14. 托盘实际尺寸；
 15. 机械爪的安全半径；
-16. 最小系统板扩展排针与板载TF/SD、LED、按键的实际网络。
+16. 最小系统板扩展排针与板载TF/SD、LED、按键的实际网络；
+17. ST7789V2模块背光的有效电平，以及是否需要反显（INVON）
+    和RGB/BGR顺序（MADCTL）。
 
 
 二十四、方案核心原则
@@ -1461,7 +1518,11 @@ MCU复位和初始化期间，所有电机必须默认关闭。
 12. SWD、复位、BOOT和晶振相关引脚不能随意挪作普通外设。
 13. 所有未经实测的电流、电压、脉宽和机械尺寸都不能作为最终定稿参数。
 
-二十五、转盘电机单独测试模式
+二十五、转盘电机单独测试模式（2026-10-18 已删除）
+
+说明：以下内容是当时的台架测试记录，相关宏、PA0 测试键和测试分支已删除；
+当前主循环只运行正式流程，不要再按本节恢复测试模式。
+其中“PA0 低电平有效”是当时记录错误：PA0 为 KEY1/WK_UP，实际按下读到高电平。
 
 当前调试阶段临时启用 PA0 作为转盘测试停止键，低电平有效；
 正式工程仍按本文件第十三节保留 PA0 给板载 KEY1/WK_UP。
@@ -1484,3 +1545,183 @@ turntable_test_stop_position 和 turntable_test_stop_speed_hz。
 急停仍由 SafetyManager 调用 StepperMotor_StopAll() 关闭使能，安全优先。
 
 测试完成后将 TURNTABLE_TEST_MODE 改回 0，恢复协议和分拣任务主循环。
+（2026-10-18：该测试模式已整体删除，以上仅作历史记录。）
+
+二十六、Z轴舵机与SPI显示屏改造（2026-10-14）
+
+背景：
+
+原方案中Z轴只作为扩展项，显示屏使用USART3加串口屏；
+本次加入Z轴舵机，并把显示屏改为SPI接口的ST7789V2模块。
+
+1. 硬件接口变化
+
+新增Z轴舵机：
+
+PA1 / TIM2_CH2
+PWM 50 Hz
+脉宽范围1000～2000 us
+安全位置1500 us
+
+夹爪舵机：
+
+由PE9改为PA8 / TIM1_CH1，与早期引脚分配一致；
+PE9释放给显示屏背光。
+
+显示屏：
+
+SPI2：PB13 SCK、PB15 MOSI、PB14 MISO（预留）；
+PB12为LCD_CS，PE7为LCD_DC，PE8为LCD_RST，PE9为LCD_BLK；
+USART3（PB10/PB11）保留为调试串口，不再驱动显示屏。
+
+供电：
+
+显示屏和STM32使用5 V/3.3 V逻辑电源；
+舵机使用独立5 V/6 V大电流电源，两者共地。
+
+2. CubeMX配置
+
+按本文件第二十节第6、7、10、11项设置：
+TIM1在PA8、TIM2在PA1，SPI2为主机、Mode 0、分频8，
+PB12/PE7/PE8/PE9为普通输出。
+
+3. 软件结构
+
+新增文件：
+
+Drivers/servo_z.c、Drivers/servo_z.h
+  ZServo_Init、ZServo_SetPulse、ZServo_Up、ZServo_Down、
+  ZServo_SetSafePosition、ZServo_GetPulse；
+  脉宽自动限幅1000～2000 us，比较值即脉宽微秒数。
+
+Drivers/lcd_st7789.c、Drivers/lcd_st7789.h
+  LCD_Init、LCD_Reset、LCD_WriteCommand、LCD_WriteData、
+  LCD_SetAddressWindow、LCD_FillColor、LCD_DrawImage、
+  LCD_BacklightOn、LCD_BacklightOff。
+
+Core/Src/spi.c、Core/Inc/spi.h
+  MX_SPI2_Init以及SPI2的MSP初始化。
+
+修改文件：
+
+Core/Src/tim.c、Core/Inc/tim.h
+  新增htim2和MX_TIM2_Init；
+  MSP中TIM1改用PA8、TIM2使用PA1。
+
+Core/Src/gpio.c
+  PB12、PE7、PE8、PE9的输出初始化与初始电平。
+
+Core/Inc/main.h
+  新增Z_SERVO_PWM、SERVO_PWM和LCD_*引脚宏。
+
+Core/Src/main.c
+  调用MX_TIM2_Init、MX_SPI2_Init；
+  USER CODE 2中调用ZServo_Init()、LCD_Init()并整屏刷黑自检。
+
+Core/Inc/stm32f4xx_hal_conf.h
+  启用HAL_SPI_MODULE_ENABLED。
+
+MDK-ARM/diankong.uvprojx
+  加入spi.c、servo_z.c、lcd_st7789.c和stm32f4xx_hal_spi.c。
+
+4. 上电检查顺序
+
+1. 先不接舵机，用示波器确认PA1输出50 Hz方波、脉宽1500 us；
+2. 接Z轴舵机，从1000 us开始小幅步进，确认方向和行程后再加大；
+3. 确认夹爪舵机在PA8上仍然正常工作；
+4. 确认显示屏背光点亮、刷黑和刷纯色正常；
+5. 颜色异常时调整LCD_MADCTL_VALUE（RGB/BGR）或去掉INVON命令；
+6. 以上全部正常后再进入X/Y/T轴联调。
+
+5. 已知风险
+
+1. 舵机堵转电流大，必须与STM32逻辑电源分开供电；
+2. SPI填充是阻塞发送，整屏刷新会占用数百毫秒，
+   只在初始化阶段使用，不能放在TIM6节拍相关的实时路径中；
+3. 显示屏暂未使用DMA和局部刷新，
+   后续需要更高刷新率时再改为DMA发送。
+
+6. 主机仿真复核（2026-10-14）
+
+复核方式：
+
+1. 用 gcc -fsyntax-only 对 main.c、tim.c、spi.c、gpio.c、usart.c、
+   servo_z.c、lcd_st7789.c、servo_gripper.c 做语法检查，无错误；
+2. 用真实HAL头文件 + HAL桩函数做主机仿真，脚本放在 tools/hostsim
+   （不参与Keil构建，运行方法见该目录的README）；
+3. 用[xml]解析diankong.uvprojx，确认工程文件仍是合法XML，
+   并已包含 spi.c、servo_z.c、lcd_st7789.c、stm32f4xx_hal_spi.c，
+   IncludePath 中含 Drivers/STM32F4xx_HAL_Driver/Inc；
+4. 核对 diankong.ioc：PE9 已改为普通输出（LCD_BLK），
+   PA8 为 S_TIM1_CH1、PA1 为 S_TIM2_CH2，代码中不再有 PE9 作 TIM1 的用法。
+
+仿真结果：669项检查全部通过，覆盖
+
+- 整屏填充的窗口值（x 为 0..239、y 为 0..319）、RAMWR命令、
+  153600字节像素数据、RGB565大端字节序和512字节分块；
+- 绘图窗口换算和行优先像素流；
+- 越界坐标、宽高为0、空指针调用不产生任何SPI流量；
+- 命令与参数、窗口设置与像素流都在同一次片选中完成（CS只拉低一次）；
+- LCD_Init 的复位时序、初始化命令顺序和背光点亮；
+- Z轴舵机比较值写入、1000～2000 us 限幅和 1500 us 安全位置。
+
+注意：仿真只能证明软件逻辑正确，不能替代示波器测量和空载实测。
+
+7. 复核后仍未闭环的事项
+
+TIM1 夹爪舵机的实际频率与脉宽范围（见第二十节第6项）仍未闭环。
+2026-10-17 已按引脚重分配改为 50 Hz / 1 us 的临时配置，
+并决定恢复 BDS300、本轮暂不测试；旧 500 Hz、CCR 100～200 配置
+未再使用，详见本节第 8 条。
+
+8. 2026-10-17 引脚重分配与舵机选型变更
+
+- PA1 在最小系统板上经 R14 510R 接板载 LED D2（低电平点亮），
+  原 PA1/TIM2_CH2 的 Z 轴 PWM 实际只驱动 LED，故停用 TIM2。
+- Z 轴舵机改为 PA8/TIM1_CH1，夹爪改为 PA9/TIM1_CH2；
+  两路共用 TIM1：Prescaler 167、Period 19999 -> 50 Hz、1 us。
+- main.c 不再调用 MX_TIM2_Init；.ioc 删除 TIM2 和 PA1，新增 PA9。
+- SG90 因塑料齿轮/输出轴易损被放弃，机械爪恢复 BDS300
+  （7.4 V、10 kg·cm、0.13 s/60°）。
+- BDS300 的 PWM 频率/脉宽范围尚未实测，本轮先不测试；
+  当前 servo_gripper 仍保留 SG90 的 1170/1870 us 临时值，
+  接 BDS300 前必须重新标定。
+- 若 BDS300 需要 500 Hz，夹爪必须改用独立定时器，
+  不能修改 TIM1 的 50 Hz，否则会同时影响 Z 轴。
+
+二十七、2026-10-18 测试代码清理
+
+- 删除 main.c 中的 TURNTABLE_TEST_MODE 和 X_AXIS_TEST_MODE 台架测试分支；
+  主循环固定运行 SafetyManager_Process、Protocol_Process、SortingTask_Process。
+- 删除 PA0 测试键配置和 TURNTABLE_TEST_KEY 宏；PD13 恢复为急停专用。
+- 删除 SafetyManager_ProcessTurntableTest()。
+- 删除 ServoGripper_Init 中的 1.5 s 上电自检和 HAL_Delay；夹爪开合恢复由
+  sorting_task.c 状态机控制。
+- PD8～PD11 由“限位专用保留”改为新增模块的优先扩展口；随后 PD8 划给夹爪，
+  PD9～PD11 仍作为扩展口，详见第二十八节。
+- 板载测试按键确认：PD0=KEY0、PD2=KEY2、PD3=KEY3、PD4=KEY4；当前未配置。
+- 删除 test.md、test_context.md 两份台架测试记录，可复用结论合并到 LESSONS.md。
+
+二十八、2026-10-18 夹爪舵机改到 PD8
+
+- 夹爪信号由 PD7 改到 PD8，PD8 属于原 PD8～PD11 优先扩展口。
+- PD8 在 STM32F407 上没有定时器复用通道，仍采用 TIM1_CH2 内部比较 +
+  软件 PWM；TIM1 时基和 PA8 的 Z 轴硬件 PWM 不变。
+- main.h 的 SERVO_PWM_Pin 改为 GPIO_PIN_8，GPIO 仍为 GPIOD；
+  gpio.c 将 PD8 配为推挽输出，.ioc 同步为 PD8 / SERVO_PWM。
+- PD9～PD11 仍作为后续新增模块的优先扩展口。
+- PD7 释放为空闲候选；改 PD8 用途前必须确认底板上没有仍接对地闭合的限位开关。
+
+二十九、2026-10-18 Z 轴改到 PA1 / TIM2_CH2，夹爪改到 PB8
+
+- 拆除 PA1 上的板载 LED D2，释放 PA1 / TIM2_CH2；Z 轴舵机由
+  PA8 / TIM1_CH1 改到 PA1 / TIM2_CH2 硬件 PWM。
+- TIM2 重新启用：APB1 定时器时钟 84 MHz，PSC=83、ARR=19999，
+  50 Hz、1 us 分辨率，比较值直接是脉宽微秒数。
+- 夹爪舵机信号由 PD8 改到 PB8；PB8 由原来的上拉输入改为推挽输出。
+  软件 PWM 方案不变：TIM1 CH2 内部比较 + 更新/比较中断翻转 PB8。
+- PA8、PD8 不再配置；PA9 仍因 PCB 未引出而不可用。
+- main.h、gpio.c、tim.c、stm32f4xx_it.c、servo_z.c/.h、servo_gripper.c/.h、
+  sorting_task.c、safety_manager.c 和 diankong.ioc 已同步。
+- 注意：换回未拆 LED 的板子时，PA1 不能直接输出 PWM；PB8 改输出前
+  要确认底板上没有外部电路。

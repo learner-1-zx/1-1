@@ -149,23 +149,6 @@ void StepperMotor_StopAll(void)
   }
 }
 
-void StepperMotor_HoldStop(StepperAxis_t axis)
-{
-  if (axis >= STEPPER_COUNT)
-  {
-    return;
-  }
-
-  /* 立即结束剩余脉冲，但保持驱动器使能，让电机在原地保持力矩。 */
-  motors[axis].target = motors[axis].position;
-  motors[axis].busy = 0;
-  motors[axis].pulse_high = 0;
-  StepperMotor_SetEnable(&motors[axis], 1);
-  HAL_GPIO_WritePin(motors[axis].step_port, motors[axis].step_pin,
-                    motors[axis].step_active_low
-                    ? GPIO_PIN_SET : GPIO_PIN_RESET);
-}
-
 uint8_t StepperMotor_IsBusy(StepperAxis_t axis)
 {
   return (axis < STEPPER_COUNT) ? motors[axis].busy : 0;

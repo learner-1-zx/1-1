@@ -22,6 +22,10 @@
 
 /* USER CODE BEGIN 0 */
 
+/* USART3（PB10 / PB11）原先规划给串口显示屏，
+ * 2026-10-14 起显示屏改为 SPI2 + ST7789V2（见 Drivers/lcd_st7789.c），
+ * USART3 保留为调试串口 / 备用串口，不再承担显示屏通信。 */
+
 /* USER CODE END 0 */
 
 UART_HandleTypeDef huart2;

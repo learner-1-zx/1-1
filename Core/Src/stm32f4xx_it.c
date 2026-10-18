@@ -20,6 +20,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "stm32f4xx_it.h"
+#include "servo_gripper.h"
 #include "stepper_motor.h"
 #include "sorting_task.h"
 /* Private includes ----------------------------------------------------------*/
@@ -58,6 +59,7 @@
 
 /* External variables --------------------------------------------------------*/
 extern ADC_HandleTypeDef hadc1;
+extern TIM_HandleTypeDef htim1;
 extern TIM_HandleTypeDef htim6;
 extern UART_HandleTypeDef huart2;
 extern UART_HandleTypeDef huart3;
@@ -247,6 +249,20 @@ void USART3_IRQHandler(void)
 }
 
 /**
+  * @brief This function handles TIM1 update interrupt and TIM10 global interrupt.
+  */
+void TIM1_UP_TIM10_IRQHandler(void)
+{
+  /* USER CODE BEGIN TIM1_UP_TIM10_IRQn 0 */
+
+  /* USER CODE END TIM1_UP_TIM10_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim1);
+  /* USER CODE BEGIN TIM1_UP_TIM10_IRQn 1 */
+
+  /* USER CODE END TIM1_UP_TIM10_IRQn 1 */
+}
+
+/**
   * @brief This function handles TIM6 global interrupt, DAC1 and DAC2 underrun error interrupts.
   */
 void TIM6_DAC_IRQHandler(void)
@@ -264,7 +280,12 @@ void TIM6_DAC_IRQHandler(void)
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-  if (htim->Instance == TIM6)
+  if (htim->Instance == TIM1)
+  {
+    /* TIM1 更新（50 Hz）：生成夹爪 PB8 软件 PWM 的上升沿。 */
+    ServoGripper_TimerUpdateIsr();
+  }
+  else if (htim->Instance == TIM6)
   {
     /* TIM6 是运动控制节拍：先更新电机，再更新状态机计时。 */
     StepperMotor_Tick();

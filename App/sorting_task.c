@@ -69,7 +69,9 @@ void SortingTask_Process(void)
       state_tick = 0;
       break;
     case SORT_SYS_HOMING:
-      /* TODO: 根据 T_HOME 及 X/Y 限位输入实现真实回零和位置清零。
+      /* TODO: 根据 T_HOME 实现真实回零和位置清零。
+       * 限位功能后续单独接入；PD9～PD11 作为新增模块的优先扩展口，
+       * PB8 已分配给夹爪舵机，PD8 已释放。
        * 当前实现用计时占位，不能替代最终的机械回零流程。 */
       if (state_tick > 100U)
       {

@@ -20,14 +20,19 @@
 #include "adc.h"
 #include "tim.h"
 #include "usart.h"
+#include "spi.h"
 #include "gpio.h"
 #include "protocol.h"
 #include "safety_manager.h"
 #include "sorting_task.h"
 #include "stepper_motor.h"
 #include "servo_gripper.h"
+#include "servo_z.h"
+#include "lcd_st7789.h"
 
-#define TURNTABLE_TEST_MODE 1
+/* 当前固件只保留正式分拣逻辑：安全轮询 + 通信协议 + 分拣任务。
+ * 台架用的 T 轴 / X 轴测试模式和临时按键判定已删除；
+ * 以后再调试电机时另建测试分支，不要把测试代码带进正式主循环。 */
 
 /*
  * 工程分层：
@@ -69,151 +74,13 @@
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-static void TurntableTest_Init(void);
-static void TurntableTest_Process(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-#if TURNTABLE_TEST_MODE
-/* T 轴测试速度：TIM6 基础节拍 = 84 MHz / (83 + 1) / (49 + 1) = 20 kHz（每 tick 50 us）。
- * 目标步进速率越高，分频值越小，关系为 STEP_INTERVAL = TICK_HZ / SPEED_HZ。
- * 每个 STEP 有效电平固定保持 50 us，满足 TB6600 最小脉宽，与速率无关。 */
-#define TURNTABLE_TEST_TICK_HZ 20000U
-
-/* 加速段：上电后从起步速率逐步提升到最高速率，避免静止直接跳到高速造成丢步。
- * 2026-10-13 提速：起步 200 steps/s，最高 1200 steps/s（原为固定 250 steps/s）。
- * 寻找最佳速度时，可在 Keil 观察窗口监视 turntable_test_speed_hz。
- * 若在某个速率开始丢步或异响，把 SPEED_MAX_HZ 降到该速率以下即可。 */
-#define TURNTABLE_TEST_SPEED_START_HZ 200U
-#define TURNTABLE_TEST_SPEED_MAX_HZ 1200U
-
-/* 加速节奏：每 20 ms 提升 25 steps/s，从 200 提升到 1200 约需 800 ms。 */
-#define TURNTABLE_TEST_RAMP_INTERVAL_MS 20U
-#define TURNTABLE_TEST_RAMP_STEP_HZ 25U
-
-/* 单次连续运行的步数上限，保证观察期间不会中途走完而自行停下。 */
-#define TURNTABLE_TEST_RUN_STEPS 2000000L
-
-/* 停止键去抖时间：从按下到真正停机之间会多走约 FILTER_MS 对应的步数。 */
-#define TURNTABLE_TEST_KEY_FILTER_MS 20U
-
-static uint8_t turntable_test_running;
-static uint8_t turntable_test_finished;
-static uint32_t turntable_test_key_low_since;
-static uint32_t turntable_test_ramp_last_ms;
-static uint16_t turntable_test_speed_hz;
-
-/* 停机瞬间的软件步数与速率，便于在 Keil 观察窗口核对停止位置和当时速度。 */
-static int32_t turntable_test_stop_position;
-static uint16_t turntable_test_stop_speed_hz;
-
-/* 由目标速率换算出 TIM6 分频值，并写入 T 轴。 */
-static void TurntableTest_SetSpeed(uint16_t speed_hz)
-{
-  if (speed_hz == 0U)
-  {
-    speed_hz = 1U;
-  }
-  StepperMotor_SetStepInterval(STEPPER_T,
-                               (uint16_t)(TURNTABLE_TEST_TICK_HZ / speed_hz));
-}
-
-static void TurntableTest_Init(void)
-{
-  turntable_test_running = 0;
-  turntable_test_finished = 0;
-  turntable_test_key_low_since = 0;
-  turntable_test_ramp_last_ms = 0;
-  turntable_test_speed_hz = TURNTABLE_TEST_SPEED_START_HZ;
-  turntable_test_stop_position = 0;
-  turntable_test_stop_speed_hz = 0;
-  TurntableTest_SetSpeed(TURNTABLE_TEST_SPEED_START_HZ);
-}
-
-static void TurntableTest_Process(void)
-{
-  GPIO_PinState key_state;
-  uint16_t next_speed_hz;
-
-  if (!SafetyManager_IsSafe())
-  {
-    /* 急停已由安全模块锁存并关闭使能，这里只结束测试并记录停机位置。 */
-    turntable_test_stop_position = StepperMotor_GetPosition(STEPPER_T);
-    turntable_test_stop_speed_hz = turntable_test_speed_hz;
-    turntable_test_running = 0;
-    turntable_test_finished = 1;
-    return;
-  }
-
-  key_state = HAL_GPIO_ReadPin(TURNTABLE_TEST_KEY_GPIO_Port,
-                               TURNTABLE_TEST_KEY_Pin);
-
-  if (!turntable_test_running)
-  {
-    if (turntable_test_finished)
-    {
-      return;
-    }
-
-    /* 上电时若按键已经按下，先等待释放，防止误启动。 */
-    if (key_state == GPIO_PIN_SET)
-    {
-      turntable_test_speed_hz = TURNTABLE_TEST_SPEED_START_HZ;
-      turntable_test_ramp_last_ms = HAL_GetTick();
-      TurntableTest_SetSpeed(turntable_test_speed_hz);
-      /* 一次性设定足够大的连续行程，全程保持使能，
-       * 避免原分段方式在段间反复开关使能造成高速抖动。 */
-      StepperMotor_MoveTo(STEPPER_T, TURNTABLE_TEST_RUN_STEPS);
-      turntable_test_running = 1;
-    }
-    return;
-  }
-
-  /* 加速段：按固定时间间隔提升一步速率，直到达到最高速率。 */
-  if (turntable_test_speed_hz < TURNTABLE_TEST_SPEED_MAX_HZ &&
-      (HAL_GetTick() - turntable_test_ramp_last_ms)
-       >= TURNTABLE_TEST_RAMP_INTERVAL_MS)
-  {
-    turntable_test_ramp_last_ms = HAL_GetTick();
-    next_speed_hz = (uint16_t)(turntable_test_speed_hz
-                               + TURNTABLE_TEST_RAMP_STEP_HZ);
-    if (next_speed_hz > TURNTABLE_TEST_SPEED_MAX_HZ)
-    {
-      next_speed_hz = TURNTABLE_TEST_SPEED_MAX_HZ;
-    }
-    turntable_test_speed_hz = next_speed_hz;
-    TurntableTest_SetSpeed(next_speed_hz);
-  }
-
-  /* 停止键：低电平去抖稳定后立即停止脉冲输出。
-   * 保留驱动器使能，用保持力矩防止停机后滑移，便于核对停止位置。 */
-  if (key_state == GPIO_PIN_RESET)
-  {
-    if (turntable_test_key_low_since == 0U)
-    {
-      turntable_test_key_low_since = HAL_GetTick();
-    }
-    else if ((HAL_GetTick() - turntable_test_key_low_since)
-             >= TURNTABLE_TEST_KEY_FILTER_MS)
-    {
-      turntable_test_stop_position = StepperMotor_GetPosition(STEPPER_T);
-      turntable_test_stop_speed_hz = turntable_test_speed_hz;
-      StepperMotor_HoldStop(STEPPER_T);
-      turntable_test_running = 0;
-      turntable_test_finished = 1;
-      turntable_test_key_low_since = 0;
-    }
-    return;
-  }
-
-  turntable_test_key_low_since = 0;
-}
-#endif
-
+/* 台架测试代码已删除；运动控制统一由 App/sorting_task.c 调度。 */
 /* USER CODE END 0 */
 
 /**
@@ -246,20 +113,28 @@ int main(void)
   /* 初始化顺序：底层 HAL/外设先完成，再启动应用模块和周期中断。 */
   MX_GPIO_Init();
   MX_TIM1_Init();
+  /* Z 轴舵机使用 PA1 / TIM2_CH2 硬件 PWM（板载 LED 已拆除）；
+   * 夹爪舵机信号接 PB8，由 TIM1_CH2 内部比较中断生成软件 PWM。
+   * PA9 在 PCB 上未引出，禁止再使用。 */
+  MX_TIM2_Init();
   MX_USART2_UART_Init();
   MX_USART3_UART_Init();
+  MX_SPI2_Init();
   MX_ADC1_Init();
   MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
   StepperMotor_Init();
+  /* 先启动 Z 轴和夹爪 PWM；夹爪初始位置与开合由分拣状态机控制，
+   * 上电不再执行会阻塞 1.5 s 的舵机自检。 */
+  ZServo_Init();
   ServoGripper_Init();
+  /* 显示屏初始化：SPI2 + ST7789V2，初始化完成后打开背光。 */
+  LCD_Init();
+  /* 上电自检：整屏刷黑，确认 SPI 通路、片选和复位时序正常。 */
+  LCD_FillColor(LCD_COLOR_BLACK);
   SafetyManager_Init();
-#if TURNTABLE_TEST_MODE
-  TurntableTest_Init();
-#else
   SortingTask_Init();
   Protocol_Init();
-#endif
   HAL_TIM_Base_Start_IT(&htim6);
   /* USER CODE END 2 */
 
@@ -268,16 +143,9 @@ int main(void)
   while (1)
   {
     /* 所有函数都应保持非阻塞，步进脉冲由 TIM6 中断统一调度。 */
-#if TURNTABLE_TEST_MODE
-    SafetyManager_ProcessTurntableTest();
-#else
     SafetyManager_Process();
     Protocol_Process();
     SortingTask_Process();
-#endif
-#if TURNTABLE_TEST_MODE
-    TurntableTest_Process();
-#endif
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

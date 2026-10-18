@@ -1,6 +1,7 @@
 # Keil build output
 **/Objects/
 **/Listings/
+**/*.lst
 **/*.axf
 **/*.elf
 **/*.hex
