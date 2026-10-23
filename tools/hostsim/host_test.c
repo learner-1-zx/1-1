@@ -5,6 +5,8 @@
 #include "lcd_st7789.h"
 #include "servo_z.h"
 #include "servo_gripper.h"
+#include "hall_sensor.h"
+#include "sorting_config.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -239,99 +241,194 @@ static void test_init_sequence(void)
 
 static void test_z_servo(void)
 {
-  printf("test 7: Z servo TIM1_CH1 pulse clamping in microseconds\n");
+  printf("test 7: Z servo TIM2_CH2 (PA1) pulse clamping in microseconds\n");
   host_reset();
-  htim1.Instance = &host_tim1_regs;
+  htim2.Instance = &host_tim2_regs;
 
   ZServo_Init();
-  CHECK(host_pwm_start_ch1 == 1U, "ZServo_Init starts TIM1 channel 1");
-  CHECK(host_tim1_regs.CCR1 == ZSERVO_PULSE_SAFE_US,
-        "power on pulse is 1500 us");
-  CHECK(ZServo_GetPulse() == ZSERVO_PULSE_SAFE_US, "reported pulse is 1500 us");
+  CHECK(host_pwm_z_start == 1U, "ZServo_Init starts TIM2 channel 2");
+  CHECK(host_pwm_grip_start == 0U, "ZServo_Init does not touch TIM1");
+  CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_TRAVEL_US,
+        "power on pulse is the travel height");
+  CHECK(ZServo_GetPulse() == ZSERVO_PULSE_TRAVEL_US,
+        "reported pulse is the travel height");
 
   ZServo_SetPulse(500U);
-  CHECK(host_tim1_regs.CCR1 == ZSERVO_PULSE_MIN_US,
+  CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_MIN_US,
         "below range is clamped to 1000 us");
   CHECK(ZServo_GetPulse() == ZSERVO_PULSE_MIN_US, "reported pulse follows clamp");
 
   ZServo_SetPulse(2500U);
-  CHECK(host_tim1_regs.CCR1 == ZSERVO_PULSE_MAX_US,
+  CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_MAX_US,
         "above range is clamped to 2000 us");
 
   ZServo_SetPulse(1750U);
-  CHECK(host_tim1_regs.CCR1 == 1750U, "in range pulse is written unchanged");
+  CHECK(host_tim2_regs.CCR2 == 1750U, "in range pulse is written unchanged");
 
-  ZServo_Up();
-  CHECK(host_tim1_regs.CCR1 == ZSERVO_PULSE_UP_US, "Up uses the UP macro");
-  ZServo_Down();
-  CHECK(host_tim1_regs.CCR1 == ZSERVO_PULSE_DOWN_US, "Down uses the DOWN macro");
+  ZServo_Approach();
+  CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_APPROACH_US,
+        "Approach uses the APPROACH macro");
+  ZServo_Grasp();
+  CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_GRASP_US,
+        "Grasp uses the GRASP macro");
+  ZServo_Travel();
+  CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_TRAVEL_US,
+        "Travel uses the TRAVEL macro");
   ZServo_SetSafePosition();
-  CHECK(host_tim1_regs.CCR1 == ZSERVO_PULSE_SAFE_US, "safe position is 1500 us");
+  CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_TRAVEL_US,
+        "safe position is the travel height");
+
+  CHECK((ZSERVO_PULSE_TRAVEL_US < ZSERVO_PULSE_APPROACH_US) &&
+        (ZSERVO_PULSE_APPROACH_US < ZSERVO_PULSE_GRASP_US),
+        "height order is TRAVEL < APPROACH < GRASP");
 }
 
 static void test_gripper_servo(void)
 {
-  /* 注意：1170/1870 us 是 SG90 试装的临时值；夹爪最终选型为 BDS300，
-   * 标定后需要同步修改这里的断言。
-   * PD8 没有定时器通道，这里模拟 TIM1 更新 / CH2 比较两次中断，
-   * 验证软件 PWM 的高电平、CCR2 和低电平顺序。 */
-  printf("test 8: gripper software PWM on PD8 via TIM1_CH2 compare (production init)\n");
+  /* BDS300 2026-10-20 实测：闭合临界 1390 us、张开临界 1800 us，
+   * 正式值各留 20 us 余量（1410/1780）；换舵机后同步修改这里。
+   * 上电 ServoGripper_Init() 不启动 PWM、不写 CCR1：夹爪位置由状态机
+   * 在 SORT_SYS_INIT 里调用 Open() 决定，避免先摆到 1500 us 再张开。
+   * 当前夹爪用 PA8 / TIM1_CH1 硬件 PWM，不再需要更新/比较中断。 */
+  printf("test 8: gripper servo TIM1_CH1 (PA8) hardware PWM\n");
   host_reset();
-  CHECK(SERVO_PWM_Pin == GPIO_PIN_8, "gripper PWM pin must be PD8");
-  CHECK(SERVO_PWM_GPIO_Port == GPIOD, "gripper PWM port must be GPIOD");
+  htim1.Instance = &host_tim1_regs;
+
+  CHECK(SERVO_PWM_Pin == GPIO_PIN_8, "gripper PWM pin must be PA8");
+  CHECK(SERVO_PWM_GPIO_Port == GPIOA, "gripper PWM port must be GPIOA");
 
   ServoGripper_Init();
-  CHECK(host_pwm_start_ch2 == 1U,
-        "ServoGripper_Init starts TIM1 channel 2 compare interrupt");
-  CHECK(host_pwm_start_ch1 == 0U, "gripper no longer drives TIM1 channel 1");
-  CHECK((host_tim1_regs.DIER & TIM_IT_CC2) != 0U,
-        "ServoGripper_Init enables the TIM1 CH2 compare interrupt");
-  CHECK((host_tim1_regs.DIER & TIM_IT_UPDATE) != 0U,
-        "ServoGripper_Init also enables the TIM1 update interrupt");
-  CHECK(host_delay_ms == 0U, "ServoGripper_Init no longer blocks for a self test");
+  CHECK(host_pwm_grip_start == 0U,
+        "ServoGripper_Init no longer starts TIM1 channel 1");
+  CHECK(host_pwm_z_start == 0U, "gripper init does not touch TIM2");
+  CHECK(host_pwm_start_it == 0U,
+        "gripper uses hardware PWM, not update/compare interrupts");
+  CHECK(host_delay_ms == 0U, "ServoGripper_Init no longer blocks");
+  CHECK(host_tim1_regs.CCR1 == 0U,
+        "power-on leaves CCR1 untouched (no 1500 us intermediate position)");
   CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_OPEN_PULSE_US,
-        "power-on default is the open pulse");
+        "driver state starts from the open pulse");
   CHECK(ServoGripper_IsClosed() == 0U, "gripper reports open after init");
 
-  /* 模拟 TIM1 更新中断：写入 CCR2 并把 PD8 拉高。 */
-  ServoGripper_TimerUpdateIsr();
-  CHECK(host_tim1_regs.CCR2 == SERVO_GRIPPER_OPEN_PULSE_US,
-        "update ISR writes the open pulse to CCR2");
-  CHECK(host_servo_level == 1U, "update ISR drives PD8 high");
-
-  /* 模拟 TIM1_CH2 比较匹配：PD8 拉低。 */
-  htim1.Channel = HAL_TIM_ACTIVE_CHANNEL_2;
-  HAL_TIM_PWM_PulseFinishedCallback(&htim1);
-  CHECK(host_servo_level == 0U, "CC2 callback drives PD8 low");
-
-  ServoGripper_Close();
+  /* 上电后第一件事就是按 KEY1 的场景：JumpTo 必须自己补启动 PWM，
+   * 并且第一帧就是目标脉宽（不能先输出 1500 或旧值）。 */
+  ServoGripper_JumpTo(SERVO_GRIPPER_CLOSE_PULSE_US, 1U);
+  CHECK(host_pwm_grip_start == 1U,
+        "first JumpTo starts TIM1 channel 1 when PWM is not running");
+  CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_CLOSE_PULSE_US,
+        "first JumpTo writes the close pulse to CCR1");
   CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_CLOSE_PULSE_US,
-        "Close selects the close pulse");
-  CHECK(ServoGripper_IsClosed() == 1U, "gripper reports closed");
-  ServoGripper_TimerUpdateIsr();
-  CHECK(host_tim1_regs.CCR2 == SERVO_GRIPPER_CLOSE_PULSE_US,
-        "next update ISR applies the close pulse");
-  CHECK(host_servo_level == 1U, "PD8 is high during the close pulse");
-
-  htim1.Channel = HAL_TIM_ACTIVE_CHANNEL_2;
-  HAL_TIM_PWM_PulseFinishedCallback(&htim1);
-  CHECK(host_servo_level == 0U, "CC2 callback ends the close pulse");
+        "reported pulse follows the first JumpTo");
+  CHECK(ServoGripper_IsClosed() == 1U,
+        "first JumpTo updates the closed flag (closed)");
 
   ServoGripper_Open();
+  CHECK(host_pwm_grip_start == 1U,
+        "Open reuses the already running PWM (no double start)");
+  CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_OPEN_PULSE_US,
+        "Open writes the open pulse to CCR1");
   CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_OPEN_PULSE_US,
-        "Open selects the open pulse");
+        "reported pulse follows Open");
   CHECK(ServoGripper_IsClosed() == 0U, "gripper reports open");
 
-  CHECK((SERVO_GRIPPER_OPEN_PULSE_US - SERVO_GRIPPER_CLOSE_PULSE_US) == 700U,
-        "open-close travel is 700 us (63 degrees with SG90 provisional values)");
+  ServoGripper_Close();
+  CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_CLOSE_PULSE_US,
+        "Close writes the close pulse to CCR1");
+  CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_CLOSE_PULSE_US,
+        "reported pulse follows Close");
+  CHECK(ServoGripper_IsClosed() == 1U, "gripper reports closed");
+
+  /* 台架按键一次到位：JumpTo 直接写 CCR1，不经过 5 us/20 ms 缓动。 */
+  ServoGripper_JumpTo(SERVO_GRIPPER_MAX_PULSE_US, 0U);
+  CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_MAX_PULSE_US,
+        "JumpTo writes the requested pulse to CCR1 immediately");
+  CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_MAX_PULSE_US,
+        "reported pulse follows JumpTo");
+  CHECK(ServoGripper_IsClosed() == 0U,
+        "JumpTo updates the closed flag (open)");
+
+  ServoGripper_JumpTo(1000U, 1U);
+  CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_MIN_PULSE_US,
+        "JumpTo clamps below the measured 1390 us mechanical window");
+  CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_MIN_PULSE_US,
+        "reported pulse follows the JumpTo clamp");
+  CHECK(ServoGripper_IsClosed() == 1U,
+        "JumpTo updates the closed flag (closed)");
+
+  CHECK((SERVO_GRIPPER_OPEN_PULSE_US - SERVO_GRIPPER_CLOSE_PULSE_US) == 370U,
+        "open-close travel is 370 us (410 us measured, 20 us margin each side)");
   CHECK((SERVO_GRIPPER_CLOSE_PULSE_US >= SERVO_GRIPPER_MIN_PULSE_US) &&
         (SERVO_GRIPPER_OPEN_PULSE_US <= SERVO_GRIPPER_MAX_PULSE_US),
-        "both positions stay inside the 500~2500 us window");
+        "both positions stay inside the measured 1390~1800 us window");
+}
+
+/* 霍尔开关接 PD12/T_HOME：内部上拉，低有效（有磁铁 = 低）。
+ * 仿真只复核引脚映射、读取和极性换算，真实电平原机用万用表
+ * 在 PD12 上确认。 */
+static void test_hall_sensor(void)
+{
+  printf("test 9: hall sensor PD12/T_HOME read and active-low mapping\n");
+
+  host_reset();
+
+  CHECK((HALL_SENSOR_GPIO_Port == GPIOD) && (HALL_SENSOR_Pin == GPIO_PIN_12),
+        "hall sensor is mapped to PD12 (T_HOME)");
+  CHECK(HALL_SENSOR_ACTIVE_HIGH == 0,
+        "hall sensor is active low (open collector)");
+
+  host_hall_level = 1U;
+  CHECK(HallSensor_ReadRaw() == GPIO_PIN_SET,
+        "no magnet: PD12 is pulled high (3.3 V)");
+  CHECK(HallSensor_IsTriggered() == 0U,
+        "no magnet: sensor reports not triggered");
+
+  host_hall_level = 0U;
+  CHECK(HallSensor_ReadRaw() == GPIO_PIN_RESET,
+        "magnet near: PD12 is pulled low (0 V)");
+  CHECK(HallSensor_IsTriggered() == 1U,
+        "magnet near: sensor reports triggered");
+}
+
+/* T 轴仓距：16640 不能被 6 整除，必须四舍五入分配，
+ * 六段之和严格等于一圈，否则每次 6 仓循环会累积 2 步误差。 */
+static void test_turret_bin_math(void)
+{
+  uint32_t i;
+  uint32_t total = 0U;
+
+  printf("test 10: turret bin steps are exact (no 2-step/rev drift)\n");
+
+  CHECK(SORT_T_STEPS_PER_REV == 16640U,
+        "200 full steps * 16 microstep * 5.2 = 16640 steps/rev");
+  CHECK(SORT_T_STEPS_PER_BIN == 2773U, "nominal steps per bin is 2773");
+
+  CHECK(SORT_T_BIN_STEP(0) == 0, "bin 1 is at the home zero");
+  CHECK(SORT_T_BIN_STEP(1) == 2773, "bin 2 offset");
+  CHECK(SORT_T_BIN_STEP(2) == 5547, "bin 3 offset");
+  CHECK(SORT_T_BIN_STEP(3) == 8320, "bin 4 offset");
+  CHECK(SORT_T_BIN_STEP(4) == 11093, "bin 5 offset");
+  CHECK(SORT_T_BIN_STEP(5) == 13867, "bin 6 offset");
+  CHECK(SORT_T_BIN_STEP(SORT_T_BOX_COUNT) ==
+            (int32_t)SORT_T_STEPS_PER_REV,
+        "one past the last bin is exactly one revolution");
+
+  for (i = 0U; i < (uint32_t)SORT_T_BOX_COUNT; ++i)
+  {
+    int32_t next = (i + 1U < (uint32_t)SORT_T_BOX_COUNT)
+                       ? SORT_T_BIN_STEP(i + 1U)
+                       : (int32_t)SORT_T_STEPS_PER_REV;
+    int32_t pitch = next - SORT_T_BIN_STEP(i);
+
+    CHECK(pitch > 0, "bin pitches are positive");
+    total += (uint32_t)pitch;
+  }
+  CHECK(total == SORT_T_STEPS_PER_REV,
+        "six bin pitches sum to exactly one revolution");
 }
 
 int main(void)
 {
-  printf("== host simulation for lcd_st7789 / servo_z / servo_gripper ==\n");
+  printf("== host simulation for lcd_st7789 / servo_z / servo_gripper / hall_sensor ==\n");
 
   test_fill_color();
   test_draw_image();
@@ -341,6 +438,8 @@ int main(void)
   test_init_sequence();
   test_z_servo();
   test_gripper_servo();
+  test_hall_sensor();
+  test_turret_bin_math();
 
   printf("== checks=%d failures=%d ==\n", checks, failures);
   if (failures == 0)

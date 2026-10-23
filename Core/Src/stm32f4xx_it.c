@@ -20,9 +20,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "stm32f4xx_it.h"
-#include "servo_gripper.h"
 #include "stepper_motor.h"
-#include "sorting_task.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 /* USER CODE END Includes */
@@ -263,6 +261,20 @@ void TIM1_UP_TIM10_IRQHandler(void)
 }
 
 /**
+  * @brief This function handles TIM1 capture compare interrupt.
+  */
+void TIM1_CC_IRQHandler(void)
+{
+  /* USER CODE BEGIN TIM1_CC_IRQn 0 */
+
+  /* USER CODE END TIM1_CC_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim1);
+  /* USER CODE BEGIN TIM1_CC_IRQn 1 */
+
+  /* USER CODE END TIM1_CC_IRQn 1 */
+}
+
+/**
   * @brief This function handles TIM6 global interrupt, DAC1 and DAC2 underrun error interrupts.
   */
 void TIM6_DAC_IRQHandler(void)
@@ -280,16 +292,12 @@ void TIM6_DAC_IRQHandler(void)
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-  if (htim->Instance == TIM1)
+  if (htim->Instance == TIM6)
   {
-    /* TIM1 更新（50 Hz）：生成夹爪 PB8 软件 PWM 的上升沿。 */
-    ServoGripper_TimerUpdateIsr();
-  }
-  else if (htim->Instance == TIM6)
-  {
-    /* TIM6 是运动控制节拍：先更新电机，再更新状态机计时。 */
+    /* TIM6 是 20 kHz 运动节拍，只产生步进脉冲；
+     * 状态机计时统一使用 HAL_GetTick()（1 ms），不在中断里叠加。
+     * 夹爪和 Z 轴都使用硬件 PWM，不需要 TIM1/TIM2 更新中断。 */
     StepperMotor_Tick();
-    SortingTask_Tick();
   }
 }
 

@@ -28,9 +28,11 @@
 /*----------------------------------------------------------------------------*/
 /* Configure GPIO                                                             */
 /*----------------------------------------------------------------------------*/
-/* 方向/使能/步进和夹爪舵机信号为推挽输出；
- * 急停和夹爪传感器为上拉输入。PD9～PD11 作为新增模块的优先扩展口，
- * 当前固件不配置；限位功能后续单独考虑。 */
+/* 方向/使能/步进信号为推挽输出；Z 轴和夹爪舵机由定时器 AF 输出；
+ * 急停、夹爪传感器、T_HOME 和台架按键为上拉输入。T_HOME（PD12）
+ * 接转盘零位霍尔，开集电极低有效：有磁铁时被拉低。
+ * PD11 改名 SPARE_PD11，上拉备用；PD9、PD10 仍作为新增模块的
+ * 优先扩展口，当前固件不配置；限位功能后续单独考虑。 */
 /* USER CODE BEGIN 1 */
 
 /* USER CODE END 1 */
@@ -65,11 +67,6 @@ void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(T_STEP_GPIO_Port, T_STEP_Pin, GPIO_PIN_RESET);
 
-  /* 夹爪舵机信号 PB8 初始为低，避免上电出现长时间高电平。
-   * 实际 50 Hz 脉冲由 servo_gripper.c 在 TIM1 中断中软件生成。 */
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(SERVO_PWM_GPIO_Port, SERVO_PWM_Pin, GPIO_PIN_RESET);
-
   /* LCD_CS 空闲为高；LCD_RST/LCD_DC 初始为高（RST 高表示不复位）；
    * LCD_BLK 初始为低，等初始化完成后再由驱动打开背光。 */
   /*Configure GPIO pin Output Level */
@@ -97,18 +94,22 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : T_HOME_Pin EMERGENCY_STOP_Pin GRIP_SENSOR_Pin */
-  GPIO_InitStruct.Pin = T_HOME_Pin|EMERGENCY_STOP_Pin|GRIP_SENSOR_Pin;
+  /*Configure GPIO pins : T_HOME_Pin EMERGENCY_STOP_Pin GRIP_SENSOR_Pin
+                           KEY0_Pin KEY1_Pin KEY2_Pin KEY3_Pin */
+  GPIO_InitStruct.Pin = T_HOME_Pin|EMERGENCY_STOP_Pin|GRIP_SENSOR_Pin
+                          |KEY0_Pin|KEY1_Pin|KEY2_Pin|KEY3_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PB8 (夹爪舵机软件 PWM 信号) */
-  GPIO_InitStruct.Pin = SERVO_PWM_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(SERVO_PWM_GPIO_Port, &GPIO_InitStruct);
+  /*Configure GPIO pin : SPARE_PD11_Pin (PD11)
+   * PD11 不再接霍尔：实际零位霍尔在 PD12/T_HOME。
+   * 这里保留为上拉输入备用，避免悬空；后续若接第二路传感器，
+   * 按器件 datasheet 修改 Pull 和有效电平即可。 */
+  GPIO_InitStruct.Pin = SPARE_PD11_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(SPARE_PD11_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : T_STEP_Pin */
   GPIO_InitStruct.Pin = T_STEP_Pin;
@@ -130,10 +131,6 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
-
-  /* 板载测试按键 KEY0/KEY2/KEY3/KEY4 分别接 PD0/PD2/PD3/PD4。
-   * 当前正式固件不使用这些按键，保持默认输入状态；
-   * 以后恢复台架测试时再按实际电平配置上拉/下拉，不要照搬 PA0 的高电平有效。 */
 
 }
 

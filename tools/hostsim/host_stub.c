@@ -1,4 +1,5 @@
 #include "host_stub.h"
+#include "hall_sensor.h"
 #include <string.h>
 
 uint8_t      host_bytes[HOST_TRACE_MAX];
@@ -12,9 +13,12 @@ uint32_t     host_rst_high;
 uint8_t      host_dc_level = 1U;
 uint8_t      host_blk_level;
 uint32_t     host_delay_ms;
-uint32_t     host_pwm_start_ch2;
-uint32_t     host_pwm_start_ch1;
-uint8_t      host_servo_level;
+uint32_t     host_tick_ms;
+uint32_t     host_error_handler_calls;
+uint32_t     host_pwm_z_start;
+uint32_t     host_pwm_grip_start;
+uint32_t     host_pwm_start_it;
+uint8_t      host_hall_level;
 
 /* 外设句柄实体：仿真时用普通内存代替寄存器，__HAL_TIM_SET_COMPARE
  * 会直接写到 host_timX_regs.CCRx 上。 */
@@ -40,9 +44,12 @@ void host_reset(void)
   host_dc_level = 1U;
   host_blk_level = 0U;
   host_delay_ms = 0U;
-  host_pwm_start_ch2 = 0U;
-  host_pwm_start_ch1 = 0U;
-  host_servo_level = 0U;
+  host_tick_ms = 0U;
+  host_error_handler_calls = 0U;
+  host_pwm_z_start = 0U;
+  host_pwm_grip_start = 0U;
+  host_pwm_start_it = 0U;
+  host_hall_level = 0U;
   memset(host_xfers, 0, sizeof(host_xfers));
   memset(&host_tim1_regs, 0, sizeof(host_tim1_regs));
   memset(&host_tim2_regs, 0, sizeof(host_tim2_regs));
@@ -98,10 +105,15 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin,
   {
     host_blk_level = (PinState == GPIO_PIN_SET) ? 1U : 0U;
   }
-  else if ((GPIOx == SERVO_PWM_GPIO_Port) && (GPIO_Pin == SERVO_PWM_Pin))
+}
+
+GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin)
+{
+  if ((GPIOx == HALL_SENSOR_GPIO_Port) && (GPIO_Pin == HALL_SENSOR_Pin))
   {
-    host_servo_level = (PinState == GPIO_PIN_SET) ? 1U : 0U;
+    return (host_hall_level != 0U) ? GPIO_PIN_SET : GPIO_PIN_RESET;
   }
+  return GPIO_PIN_RESET;
 }
 
 HAL_StatusTypeDef HAL_SPI_Transmit(SPI_HandleTypeDef *hspi,
@@ -137,11 +149,14 @@ void HAL_Delay(uint32_t Delay)
 
 HAL_StatusTypeDef HAL_TIM_PWM_Start(TIM_HandleTypeDef *htim, uint32_t Channel)
 {
-  /* TIM1_CH1 为 Z 轴舵机（PA8）。
-   * 原 TIM2_CH2（PA1）已停用：PA1 在最小系统板上接板载 LED。 */
-  if ((htim == &htim1) && (Channel == TIM_CHANNEL_1))
+  /* Z 轴：TIM2_CH2（PA1）；夹爪：TIM1_CH1（PA8）。 */
+  if ((htim == &htim2) && (Channel == TIM_CHANNEL_2))
   {
-    host_pwm_start_ch1++;
+    host_pwm_z_start++;
+  }
+  else if ((htim == &htim1) && (Channel == TIM_CHANNEL_1))
+  {
+    host_pwm_grip_start++;
   }
   return HAL_OK;
 }
@@ -149,13 +164,20 @@ HAL_StatusTypeDef HAL_TIM_PWM_Start(TIM_HandleTypeDef *htim, uint32_t Channel)
 HAL_StatusTypeDef HAL_TIM_PWM_Start_IT(TIM_HandleTypeDef *htim,
                                        uint32_t Channel)
 {
-  /* TIM1_CH2 仅作内部比较，夹爪信号由 PD8 软件生成。
-   * 真机 HAL 只打开 CC2 中断，更新中断由 servo_gripper.c 单独使能；这里同样
-   * 只置 CC2IE，便于测试分别核对两个中断源。 */
-  if ((htim == &htim1) && (Channel == TIM_CHANNEL_2))
-  {
-    htim->Instance->DIER |= TIM_IT_CC2;
-    host_pwm_start_ch2++;
-  }
+  /* 当前两路舵机都用硬件 PWM，不再需要更新/比较中断。 */
+  (void)htim;
+  (void)Channel;
+  host_pwm_start_it++;
   return HAL_OK;
+}
+
+uint32_t HAL_GetTick(void)
+{
+  return host_tick_ms;
+}
+
+void Error_Handler(void)
+{
+  /* 主机仿真不进入死循环，只记录调用次数。 */
+  host_error_handler_calls++;
 }

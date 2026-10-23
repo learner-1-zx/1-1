@@ -20,5 +20,7 @@ void SafetyManager_Process(void);
 uint8_t SafetyManager_IsSafe(void);
 /* 返回具体故障类型，便于状态上报和调试。 */
 SafetyFault_t SafetyManager_GetFault(void);
+/* 急停松开后清除锁存故障；急停仍按下时保持故障，返回 0。 */
+uint8_t SafetyManager_ResetFault(void);
 
 #endif

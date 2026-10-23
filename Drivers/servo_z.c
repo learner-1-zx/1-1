@@ -21,8 +21,12 @@ static uint16_t ZServo_ClampPulse(uint16_t pulse)
 
 void ZServo_Init(void)
 {
-  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2);
+  /* 先写比较值再启动 PWM，确保第一个周期就是运输高度。 */
   ZServo_SetSafePosition();
+  if (HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
 }
 
 void ZServo_SetPulse(uint16_t pulse)
@@ -31,19 +35,34 @@ void ZServo_SetPulse(uint16_t pulse)
   __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_2, zservo_pulse_us);
 }
 
+void ZServo_Travel(void)
+{
+  ZServo_SetPulse(ZSERVO_PULSE_TRAVEL_US);
+}
+
+void ZServo_Approach(void)
+{
+  ZServo_SetPulse(ZSERVO_PULSE_APPROACH_US);
+}
+
+void ZServo_Grasp(void)
+{
+  ZServo_SetPulse(ZSERVO_PULSE_GRASP_US);
+}
+
 void ZServo_Up(void)
 {
-  ZServo_SetPulse(ZSERVO_PULSE_UP_US);
+  ZServo_Travel();
 }
 
 void ZServo_Down(void)
 {
-  ZServo_SetPulse(ZSERVO_PULSE_DOWN_US);
+  ZServo_Grasp();
 }
 
 void ZServo_SetSafePosition(void)
 {
-  ZServo_SetPulse(ZSERVO_PULSE_SAFE_US);
+  ZServo_Travel();
 }
 
 uint16_t ZServo_GetPulse(void)

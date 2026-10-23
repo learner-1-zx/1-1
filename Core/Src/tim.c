@@ -29,18 +29,15 @@ TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim6;
 
 /* TIM2_CH2：Z 轴舵机硬件 PWM（PA1）。
- * TIM1_CH2：夹爪舵机内部比较通道（无引脚输出）。
- * 夹爪信号接 PB8，PB8 只作普通 GPIO；在 TIM1 更新中断中先写入 CCR2、
- * 再把 PB8 拉高，在 CH2 比较中断中把 PB8 拉低，形成 50 Hz 软件 PWM。
+ * TIM1_CH1：夹爪舵机硬件 PWM，PA8 直接输出。
  * TIM2 挂在 APB1，定时器时钟 84 MHz：
  * Prescaler 83 -> 1 MHz（1 us/tick），Period 19999 -> 20 ms（50 Hz）。
  * TIM1 挂在 APB2，时钟 168 MHz：
  * Prescaler 167 -> 1 MHz（1 us/tick），Period 19999 -> 20 ms（50 Hz）。
  * 两路比较值都直接是脉宽微秒数。
  * PA1 的板载 LED 已拆除，可正常作 TIM2_CH2 复用输出。
- * PA9 虽然可复用为 TIM1_CH2，但 PCB 未引出，MSP 不再配置该引脚。
  * TIM6：运动控制基础节拍，更新频率由 Prescaler 和 Period 决定，
- * 其周期回调中会产生步进脉冲并累计任务超时。 */
+ * 其周期回调中只产生步进脉冲；任务计时统一使用 HAL_GetTick()。 */
 /* TIM1 init function */
 void MX_TIM1_Init(void)
 {
@@ -85,7 +82,9 @@ void MX_TIM1_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  /* CH1 已不再使用（Z 轴已改到 TIM2_CH2），保留默认比较值即可。 */
+  /* CH1 直接输出夹爪舵机 PWM（PA8）。这里的 Pulse 只是寄存器初值：
+   * ServoGripper_Init() 不启动 TIM1_CH1，PA8 上电没有输出；
+   * 第一次 Open/Close 时会先写 CCR1 再启动 PWM。 */
   sConfigOC.Pulse = 1500;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
@@ -96,8 +95,7 @@ void MX_TIM1_Init(void)
   {
     Error_Handler();
   }
-  /* CH2 仅作夹爪软件 PWM 的内部比较通道，不连接 GPIO。
-   * 初值给中位 1500 us，随后由 ServoGripper_Init 写入张开 / 闭合脉宽。 */
+  /* CH2 保留未使用。 */
   sConfigOC.Pulse = 1500;
   if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
   {
@@ -223,8 +221,7 @@ void HAL_TIM_Base_MspInit(TIM_HandleTypeDef* tim_baseHandle)
     HAL_NVIC_SetPriority(TIM1_UP_TIM10_IRQn, 1, 0);
     HAL_NVIC_EnableIRQ(TIM1_UP_TIM10_IRQn);
   /* USER CODE BEGIN TIM1_MspInit 1 */
-    /* 夹爪软件 PWM 需要 TIM1 更新和 CH2 比较中断；
-     * Z 轴 CH1 仍由硬件输出，不依赖中断。 */
+    /* TIM1_CH1 硬件 PWM 输出夹爪信号；更新中断保留但当前未启用。 */
   /* USER CODE END TIM1_MspInit 1 */
   }
   else if(tim_baseHandle->Instance==TIM2)
@@ -261,9 +258,16 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef* timHandle)
   if(timHandle->Instance==TIM1)
   {
   /* USER CODE BEGIN TIM1_MspPostInit 0 */
-  /* TIM1 只保留 CH2 作为夹爪软件 PWM 的内部比较通道，不占用 GPIO。
-   * Z 轴已改到 PA1 / TIM2_CH2，PA8 不再配置。 */
+  /* PA8 / TIM1_CH1：夹爪舵机硬件 PWM。 */
   /* USER CODE END TIM1_MspPostInit 0 */
+
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    GPIO_InitStruct.Pin = SERVO_PWM_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = GPIO_AF1_TIM1;
+    HAL_GPIO_Init(SERVO_PWM_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN TIM1_MspPostInit 1 */
 

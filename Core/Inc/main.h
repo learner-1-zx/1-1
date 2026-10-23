@@ -82,12 +82,22 @@ void Error_Handler(void);
 #define EMERGENCY_STOP_GPIO_Port GPIOD
 #define GRIP_SENSOR_Pin GPIO_PIN_14
 #define GRIP_SENSOR_GPIO_Port GPIOD
+#define SPARE_PD11_Pin GPIO_PIN_11
+#define SPARE_PD11_GPIO_Port GPIOD
+#define KEY0_Pin GPIO_PIN_0
+#define KEY0_GPIO_Port GPIOD
+#define KEY1_Pin GPIO_PIN_1
+#define KEY1_GPIO_Port GPIOD
+#define KEY2_Pin GPIO_PIN_2
+#define KEY2_GPIO_Port GPIOD
+#define KEY3_Pin GPIO_PIN_3
+#define KEY3_GPIO_Port GPIOD
 #define T_STEP_Pin GPIO_PIN_6
 #define T_STEP_GPIO_Port GPIOB
 #define Z_SERVO_PWM_Pin GPIO_PIN_1
 #define Z_SERVO_PWM_GPIO_Port GPIOA
 #define SERVO_PWM_Pin GPIO_PIN_8
-#define SERVO_PWM_GPIO_Port GPIOB
+#define SERVO_PWM_GPIO_Port GPIOA
 #define LCD_CS_Pin GPIO_PIN_12
 #define LCD_CS_GPIO_Port GPIOB
 #define LCD_SCK_Pin GPIO_PIN_13
@@ -105,17 +115,17 @@ void Error_Handler(void);
 
 /* 舵机 PWM：
  * Z_SERVO_PWM 为 Z 轴（PA1 / TIM2_CH2，硬件 PWM）；
- * SERVO_PWM 为夹爪（PB8，普通 GPIO）。
+ * SERVO_PWM 为夹爪（PA8 / TIM1_CH1，硬件 PWM）。
  * PA1 的板载 LED 已拆除，PA1 可正常作 TIM2_CH2 复用输出。
- * PB8 只作普通 GPIO，夹爪复用 TIM1_CH2 的内部比较中断
- * （不配置 PA9 引脚）产生 50 Hz 软件 PWM：
- * TIM1 更新时先写入 CCR2，再拉高 PB8；CC2 比较匹配时 PB8 拉低。
- * PA9 虽然是 TIM1_CH2 的硬件引脚，但 PCB 未引出，禁止再使用。
- * PD8 已释放为扩展口，PD9～PD11 仍为新增模块的优先扩展口。
+ * TIM1_CH1 直接输出 50 Hz PWM，不需要 GPIO 软件翻转。
+ * PD8 已释放为扩展口；PD9、PD10 仍为新增模块的优先扩展口。
+ * PD11 改名 SPARE_PD11，上拉备用；PD12/T_HOME 才是转盘零位霍尔，
+ * 开集电极低有效，内部上拉。
  * 限位功能后续单独考虑。 */
 /* 显示屏：SPI2 + ST7789V2，SPI 引脚在 spi.c 中配置为复用功能，
  * CS/DC/RST/BLK 为普通 GPIO，由 lcd_st7789.c 控制。 */
-/* 传感器输入均在 gpio.c 中配置为上拉，低电平表示触发。 */
+/* 传感器和台架按键输入均在 gpio.c 中配置为上拉，低电平表示触发；
+ * T_HOME（PD12）同理：有磁铁时霍尔把 PD12 拉低。 */
 /* USER CODE BEGIN Private defines */
 
 /* USER CODE END Private defines */

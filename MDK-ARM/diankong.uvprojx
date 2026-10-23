@@ -444,6 +444,11 @@
               <FileType>1</FileType>
               <FilePath>../Drivers/lcd_st7789.c</FilePath>
             </File>
+            <File>
+              <FileName>hall_sensor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Drivers/hall_sensor.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

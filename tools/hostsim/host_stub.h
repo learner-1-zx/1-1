@@ -28,9 +28,12 @@ extern uint32_t     host_rst_high;
 extern uint8_t      host_dc_level;
 extern uint8_t      host_blk_level;
 extern uint32_t     host_delay_ms;
-extern uint32_t     host_pwm_start_ch2;  /* TIM1_CH2 内部比较：夹爪软件 PWM（PD8） */
-extern uint32_t     host_pwm_start_ch1;  /* TIM1_CH1：Z 轴舵机（PA8） */
-extern uint8_t      host_servo_level;    /* 夹爪软件 PWM 信号 PD8 的电平 */
+extern uint32_t     host_tick_ms;          /* HAL_GetTick() 返回值 */
+extern uint32_t     host_error_handler_calls;
+extern uint32_t     host_pwm_z_start;      /* TIM2_CH2：Z 轴舵机（PA1） */
+extern uint32_t     host_pwm_grip_start;   /* TIM1_CH1：夹爪舵机（PA8） */
+extern uint32_t     host_pwm_start_it;     /* HAL_TIM_PWM_Start_IT 调用次数（应为 0） */
+extern uint8_t      host_hall_level;       /* 仿真用 PD12/T_HOME 电平：0 = 低（有磁铁），1 = 高 */
 
 /* 外设句柄实体：仿真时用普通内存代替寄存器。 */
 extern TIM_TypeDef host_tim1_regs;

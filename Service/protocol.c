@@ -3,8 +3,6 @@
 #include "usart.h"
 #include "sorting_task.h"
 #include "safety_manager.h"
-#include "stepper_motor.h"
-#include <string.h>
 
 #define PROTOCOL_MAX_PAYLOAD 32U
 #define PROTOCOL_RX_BUFFER_SIZE 128U
@@ -14,7 +12,7 @@
 static uint8_t rx_byte;
 static uint8_t rx_buffer[PROTOCOL_RX_BUFFER_SIZE];
 static volatile uint16_t rx_write;
-static uint16_t rx_read;
+static volatile uint16_t rx_read;
 
 static uint16_t Protocol_Crc16Update(uint16_t crc, uint8_t value)
 {
@@ -74,27 +72,96 @@ static uint8_t Protocol_ReadByte(uint8_t *value)
   return 1;
 }
 
+static uint16_t Protocol_ReadU16(const uint8_t *data)
+{
+  return (uint16_t)data[0] | ((uint16_t)data[1] << 8);
+}
+
+static int32_t Protocol_ReadI32(const uint8_t *data)
+{
+  uint32_t value = (uint32_t)data[0] |
+                   ((uint32_t)data[1] << 8) |
+                   ((uint32_t)data[2] << 16) |
+                   ((uint32_t)data[3] << 24);
+  return (int32_t)value;
+}
+
 static void Protocol_HandleFrame(uint8_t command, const uint8_t *payload,
                                  uint8_t length)
 {
   SortMission_t mission;
+  SortError_t error;
 
-  /* 任务载荷长度必须严格匹配结构体，防止截断或越界解释。 */
-  if (command == PROTOCOL_CMD_SORT_MISSION &&
-      length == sizeof(SortMission_t))
+  if (command == PROTOCOL_CMD_SORT_MISSION)
   {
-    memcpy(&mission, payload, sizeof(mission));
-    if (SafetyManager_IsSafe() && SortingTask_Submit(&mission))
+    /* 只要求前 17 个有效字节；上位机若按结构体 padding 发 20 字节，
+     * 多出的尾部字节直接忽略。 */
+    if (length < SORT_MISSION_WIRE_SIZE)
     {
-      Protocol_SendEvent(0x80, mission.task_id);
+      return;
+    }
+    mission.task_id = Protocol_ReadU16(&payload[0]);
+    mission.class_id = payload[2];
+    mission.box_id = payload[3];
+    mission.pick_x_step = Protocol_ReadI32(&payload[4]);
+    mission.pick_y_step = Protocol_ReadI32(&payload[8]);
+    mission.drop_step = Protocol_ReadI32(&payload[12]);
+    mission.state = payload[16];
+
+    if (SafetyManager_IsSafe() == 0U)
+    {
+      Protocol_SendError(mission.task_id, (uint8_t)SORT_ERR_EMERGENCY);
+      return;
+    }
+
+    if (SortingTask_Submit(&mission) != 0U)
+    {
+      Protocol_SendEvent(PROTOCOL_EVENT_ACK, mission.task_id);
+    }
+    else
+    {
+      error = SortingTask_GetError();
+      if (error == SORT_ERR_NONE)
+      {
+        Protocol_SendEvent(PROTOCOL_EVENT_BUSY, mission.task_id);
+      }
+      else
+      {
+        Protocol_SendError(mission.task_id, (uint8_t)error);
+      }
     }
     return;
   }
 
   if (command == PROTOCOL_CMD_STOP)
   {
-    StepperMotor_StopAll();
+    /* 停轴、保持夹爪并进入 ERROR，需 RESET_FAULT 后重新回零。 */
     SortingTask_Stop();
+    return;
+  }
+
+  if (command == PROTOCOL_CMD_RESET_FAULT)
+  {
+    if (SortingTask_ResetFault() != 0U)
+    {
+      Protocol_SendEvent(PROTOCOL_EVENT_RESET_ACK, 0U);
+    }
+    return;
+  }
+
+  if (command == PROTOCOL_CMD_HOME)
+  {
+    if (SortingTask_RequestHoming() != 0U)
+    {
+      Protocol_SendEvent(PROTOCOL_EVENT_HOME_ACK, 0U);
+    }
+    return;
+  }
+
+  if (command == PROTOCOL_CMD_STATUS)
+  {
+    Protocol_SendStatus((uint8_t)SortingTask_GetState(),
+                        (uint8_t)SortingTask_GetError());
   }
 }
 
@@ -158,4 +225,41 @@ void Protocol_SendEvent(uint8_t event, uint16_t task_id)
   frame[7] = (uint8_t)crc;
   frame[8] = (uint8_t)(crc >> 8);
   HAL_UART_Transmit(&huart2, frame, sizeof(frame), 20);
+}
+
+void Protocol_SendError(uint16_t task_id, uint8_t error)
+{
+  uint8_t frame[10];
+  uint16_t crc;
+
+  frame[0] = 0xAA;
+  frame[1] = 0x55;
+  frame[2] = PROTOCOL_VERSION;
+  frame[3] = PROTOCOL_EVENT_ERROR;
+  frame[4] = 3U;
+  frame[5] = (uint8_t)task_id;
+  frame[6] = (uint8_t)(task_id >> 8);
+  frame[7] = error;
+  crc = Protocol_Crc16(&frame[2], 6U);
+  frame[8] = (uint8_t)crc;
+  frame[9] = (uint8_t)(crc >> 8);
+  HAL_UART_Transmit(&huart2, frame, (uint16_t)sizeof(frame), 20U);
+}
+
+void Protocol_SendStatus(uint8_t state, uint8_t error)
+{
+  uint8_t frame[9];
+  uint16_t crc;
+
+  frame[0] = 0xAA;
+  frame[1] = 0x55;
+  frame[2] = PROTOCOL_VERSION;
+  frame[3] = PROTOCOL_EVENT_STATUS;
+  frame[4] = 2U;
+  frame[5] = state;
+  frame[6] = error;
+  crc = Protocol_Crc16(&frame[2], 5U);
+  frame[7] = (uint8_t)crc;
+  frame[8] = (uint8_t)(crc >> 8);
+  HAL_UART_Transmit(&huart2, frame, (uint16_t)sizeof(frame), 20U);
 }
