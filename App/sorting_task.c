@@ -1,5 +1,6 @@
 #include "sorting_task.h"
 #include "sorting_config.h"
+#include "axis_home.h"
 #include "main.h"
 #include "hall_sensor.h"
 #include "protocol.h"
@@ -7,6 +8,9 @@
 #include "servo_gripper.h"
 #include "servo_z.h"
 #include "stepper_motor.h"
+#if SORT_DEBUG_UART
+#include "debug_uart.h"
+#endif
 
 /* 状态机只在主循环中运行；电机脉冲由 TIM6 中断产生。
  * 所有等待都使用 HAL_GetTick() 的毫秒时基，避免依赖 TIM6 的 20 kHz 计数。 */
@@ -29,6 +33,19 @@ static uint8_t home_active_seen;
 static uint32_t home_active_since_ms;
 static uint8_t home_release_seen;
 static uint32_t home_release_since_ms;
+
+/* X/Y 回零：当前正在回零的轴、对应的零点开关和方向。
+ * 三个 SORT_XY_HOMING_* 状态共用这套参数，避免为 X/Y 各写一遍状态机。 */
+static StepperAxis_t homing_axis;
+static AxisHomeId_t homing_home;
+static int8_t homing_dir;
+/* 本段回零的起始位置，用于“走太远还没触发”的保护。 */
+static int32_t homing_start_step;
+
+/* 投放口坐标：由 STM32 自己保存（上位机只发取料坐标）。
+ * 初值取 sorting_config.h 的宏，回零后可用台架按键把当前位置写进来。 */
+static int32_t drop_x_step;
+static int32_t drop_y_step;
 
 static void SortingTask_Enter(SortingState_t next)
 {
@@ -107,31 +124,45 @@ static uint8_t SortingTask_GripSensorActive(void)
 }
 #endif
 
-/* 统一的运动参数入口；换细分或更换机构后只改 sorting_config.h。 */
+/* X/Y 正式运动速度：回零、标定点动都会临时改速度，任务开始前统一恢复。 */
+static void SortingTask_ApplyXYMotionConfig(void)
+{
+  StepperMotor_SetSpeed(STEPPER_X, SORT_XY_MAX_SPEED_STEPS_S);
+  StepperMotor_SetAcceleration(STEPPER_X, SORT_XY_ACCEL_STEPS_S2);
+  StepperMotor_SetSoftLimit(STEPPER_X, SORT_X_MIN_STEP, SORT_X_MAX_STEP);
+#if SORT_ENABLE_Y_AXIS
+  StepperMotor_SetSpeed(STEPPER_Y, SORT_XY_MAX_SPEED_STEPS_S);
+  StepperMotor_SetAcceleration(STEPPER_Y, SORT_XY_ACCEL_STEPS_S2);
+  StepperMotor_SetSoftLimit(STEPPER_Y, SORT_Y_MIN_STEP, SORT_Y_MAX_STEP);
+#endif
+}
+
+/* 统一的运动参数入口；换细分或更换机构后只改 sorting_config.h。
+ * X/Y 的速度和软限位在回零完成时会再按实测值刷新一次。 */
 static void SortingTask_ApplyMotionConfig(void)
 {
   StepperMotor_SetSpeed(STEPPER_X, SORT_XY_MAX_SPEED_STEPS_S);
   StepperMotor_SetAcceleration(STEPPER_X, SORT_XY_ACCEL_STEPS_S2);
   StepperMotor_SetSoftLimit(STEPPER_X, SORT_X_MIN_STEP, SORT_X_MAX_STEP);
 
+#if SORT_ENABLE_Y_AXIS
   StepperMotor_SetSpeed(STEPPER_Y, SORT_XY_MAX_SPEED_STEPS_S);
   StepperMotor_SetAcceleration(STEPPER_Y, SORT_XY_ACCEL_STEPS_S2);
   StepperMotor_SetSoftLimit(STEPPER_Y, SORT_Y_MIN_STEP, SORT_Y_MAX_STEP);
+#else
+  /* Y 轴暂不启用（硬件未接）：软限位收紧到 0..0，驱动器保持不使能。
+   * 这样即使以后有漏掉的 Y 调用，也不会让 Y 意外动起来。 */
+  StepperMotor_SetSoftLimit(STEPPER_Y, 0, 0);
+  StepperMotor_Enable(STEPPER_Y, 0U);
+  StepperMotor_InvalidatePosition(STEPPER_Y);
+#endif
 
   StepperMotor_SetSpeed(STEPPER_T, SORT_T_MAX_SPEED_STEPS_S);
   StepperMotor_SetAcceleration(STEPPER_T, SORT_T_ACCEL_STEPS_S2);
   StepperMotor_SetSoftLimit(STEPPER_T, SORT_T_MIN_STEP, SORT_T_MAX_STEP);
 
-#if SORT_ASSUME_XY_ORIGIN
-  /* 没有 X/Y 回零开关时，操作者必须先手动把机构推到原点。
-   * 装上限位后把 SORT_ASSUME_XY_ORIGIN 改为 0，并补真正的回零流程。
-   * 这里保持 X/Y 使能，避免 T 回零期间龙门被外力推走。 */
-  StepperMotor_SetPosition(STEPPER_X, 0);
-  StepperMotor_SetPosition(STEPPER_Y, 0);
-  StepperMotor_Enable(STEPPER_X, 1U);
-  StepperMotor_Enable(STEPPER_Y, 1U);
-#endif
-  /* T 轴必须靠 T_HOME 建立绝对位置。 */
+  /* T 轴必须靠 T_HOME 建立绝对位置；X/Y 靠各自的零点开关，
+   * 在 SORT_SYS_HOMING 里作废并重新建立。 */
   StepperMotor_InvalidatePosition(STEPPER_T);
 }
 
@@ -148,6 +179,80 @@ static void SortingTask_Fail(SortError_t code)
   }
   has_mission = 0U;
   SortingTask_Enter(SORT_ERROR);
+#if SORT_DEBUG_UART
+  /* 台架没有上位机时，靠 USART3 就能看出卡在哪一步（5 = HOMING）。 */
+  DebugUart_WriteInt("SORT_ERR=", (int32_t)code);
+#endif
+}
+
+/* ---------------- X/Y 零点回零（2026-10-26） ---------------- */
+
+/* 启动单轴回零：作废位置 -> 慢速朝零点方向连续走。
+ * 返回 0 表示 JogStart 失败（参数/驱动器异常），调用方按回零失败处理。 */
+static uint8_t SortingTask_StartAxisHoming(StepperAxis_t axis,
+                                           AxisHomeId_t home, int8_t direction)
+{
+  homing_axis = axis;
+  homing_home = home;
+  homing_dir = direction;
+  homing_start_step = StepperMotor_GetPosition(axis);
+
+  StepperMotor_Stop(axis);
+  StepperMotor_InvalidatePosition(axis);
+  StepperMotor_SetAcceleration(axis, SORT_XY_ACCEL_STEPS_S2);
+  StepperMotor_SetSpeed(axis, SORT_XY_HOME_SPEED_STEPS_S);
+  AxisHome_ResetDebounce();
+  if (StepperMotor_JogStart(axis, direction) != HAL_OK)
+  {
+    return 0U;
+  }
+  SortingTask_Enter(SORT_XY_HOMING_SEARCH);
+  return 1U;
+}
+
+/* 回零搜索/退让走了超过“行程 + 2000 步”：开关没触发/没释放，
+ * 通常是开关接错、回零方向反或机械卡死。及时停机，
+ * 不要顶着机械端一直失步。 */
+static uint8_t SortingTask_HomeExceededMaxSteps(void)
+{
+  int32_t moved = StepperMotor_GetPosition(homing_axis) - homing_start_step;
+  int32_t limit = (homing_axis == STEPPER_X) ? SORT_X_HOME_MAX_STEPS
+                                             : SORT_Y_HOME_MAX_STEPS;
+
+  if (moved < 0)
+  {
+    moved = -moved;
+  }
+  return (moved > limit) ? 1U : 0U;
+}
+
+/* 慢速二次触发点定义为该轴 0 点：软限位按回零方向自动取
+ * “0~+行程”或“-行程~0”，并把速度恢复到正式任务的巡航速度。 */
+static void SortingTask_FinishAxisHoming(StepperAxis_t axis)
+{
+  StepperMotor_SetPosition(axis, 0);
+  SortingTask_ApplyXYMotionConfig();
+#if SORT_DEBUG_UART
+  DebugUart_Write((axis == STEPPER_X) ? "X_HOME OK\r\n" : "Y_HOME OK\r\n");
+#endif
+}
+
+/* X/Y 回零结束后接着回 T 轴；T 仍靠 PD12 霍尔，流程和以前完全一致。 */
+static void SortingTask_StartTurretHoming(void)
+{
+  StepperMotor_InvalidatePosition(STEPPER_T);
+  StepperMotor_SetAcceleration(STEPPER_T, SORT_T_ACCEL_STEPS_S2);
+  StepperMotor_SetSpeed(STEPPER_T, SORT_T_HOME_SPEED_STEPS_S);
+  home_active_seen = 0U;
+  home_release_seen = 0U;
+  if (StepperMotor_JogStart(STEPPER_T, (int8_t)SORT_T_HOME_DIR) != HAL_OK)
+  {
+    SortingTask_Fail(SORT_ERR_HOMING);
+    return;
+  }
+  ZServo_Travel();
+  ServoGripper_Open();
+  SortingTask_Enter(SORT_T_HOMING_SEARCH);
 }
 
 /* 计算目标仓并启动 T 轴；T 与 Z 抬升并行执行。
@@ -247,61 +352,86 @@ static void SortingTask_NormalizeTurretPosition(void)
   }
 }
 
+/* X/Y 取料：坐标来自上位机（相对零点步数）。
+ * SORT_ENABLE_Y_AXIS=0 时只动 X，Y 不使能也不参与判断。 */
 static uint8_t SortingTask_StartPickMove(void)
 {
-  if ((StepperMotor_IsTargetValid(STEPPER_X, current_mission.pick_x_step) == 0U) ||
-      (StepperMotor_IsTargetValid(STEPPER_Y, current_mission.pick_y_step) == 0U))
+  if (StepperMotor_IsTargetValid(STEPPER_X, current_mission.pick_x_step) == 0U)
   {
     return 0U;
   }
+#if SORT_ENABLE_Y_AXIS
+  if (StepperMotor_IsTargetValid(STEPPER_Y, current_mission.pick_y_step) == 0U)
+  {
+    return 0U;
+  }
+#endif
   if (StepperMotor_MoveTo(STEPPER_X, current_mission.pick_x_step) != HAL_OK)
   {
     return 0U;
   }
+#if SORT_ENABLE_Y_AXIS
   if (StepperMotor_MoveTo(STEPPER_Y, current_mission.pick_y_step) != HAL_OK)
   {
     StepperMotor_Stop(STEPPER_X);
     return 0U;
   }
+#endif
   return 1U;
 }
 
+/* X/Y 投放：目标由 STM32 自己保存（drop_x_step/drop_y_step），
+ * 默认取 SORT_DROP_X/Y_STEP，标定后可以用按键覆盖。 */
 static uint8_t SortingTask_StartDropMove(void)
 {
-  if ((StepperMotor_IsTargetValid(STEPPER_X, SORT_DROP_X_STEP) == 0U) ||
-      (StepperMotor_IsTargetValid(STEPPER_Y, SORT_DROP_Y_STEP) == 0U))
+  if (StepperMotor_IsTargetValid(STEPPER_X, drop_x_step) == 0U)
   {
     return 0U;
   }
-  if (StepperMotor_MoveTo(STEPPER_X, SORT_DROP_X_STEP) != HAL_OK)
+#if SORT_ENABLE_Y_AXIS
+  if (StepperMotor_IsTargetValid(STEPPER_Y, drop_y_step) == 0U)
   {
     return 0U;
   }
-  if (StepperMotor_MoveTo(STEPPER_Y, SORT_DROP_Y_STEP) != HAL_OK)
+#endif
+  if (StepperMotor_MoveTo(STEPPER_X, drop_x_step) != HAL_OK)
+  {
+    return 0U;
+  }
+#if SORT_ENABLE_Y_AXIS
+  if (StepperMotor_MoveTo(STEPPER_Y, drop_y_step) != HAL_OK)
   {
     StepperMotor_Stop(STEPPER_X);
     return 0U;
   }
+#endif
   return 1U;
 }
 
 #if SORT_RETURN_TO_PARK
 static uint8_t SortingTask_StartParkMove(void)
 {
-  if ((StepperMotor_IsTargetValid(STEPPER_X, SORT_PARK_X_STEP) == 0U) ||
-      (StepperMotor_IsTargetValid(STEPPER_Y, SORT_PARK_Y_STEP) == 0U))
+  if (StepperMotor_IsTargetValid(STEPPER_X, SORT_PARK_X_STEP) == 0U)
   {
     return 0U;
   }
+#if SORT_ENABLE_Y_AXIS
+  if (StepperMotor_IsTargetValid(STEPPER_Y, SORT_PARK_Y_STEP) == 0U)
+  {
+    return 0U;
+  }
+#endif
   if (StepperMotor_MoveTo(STEPPER_X, SORT_PARK_X_STEP) != HAL_OK)
   {
     return 0U;
   }
+#if SORT_ENABLE_Y_AXIS
   if (StepperMotor_MoveTo(STEPPER_Y, SORT_PARK_Y_STEP) != HAL_OK)
   {
     StepperMotor_Stop(STEPPER_X);
     return 0U;
   }
+#endif
   return 1U;
 }
 #endif
@@ -321,6 +451,16 @@ void SortingTask_Init(void)
   home_release_seen = 0U;
   home_release_since_ms = 0U;
 
+  /* 投放口初值取配置宏；标定按键可以覆盖，但掉电后回到宏里的值。 */
+  drop_x_step = SORT_DROP_X_STEP;
+  drop_y_step = SORT_DROP_Y_STEP;
+
+  /* X/Y 回零参数先指向 X；每次 StartAxisHoming 会重新赋值。 */
+  homing_axis = STEPPER_X;
+  homing_home = AXIS_HOME_X;
+  homing_dir = (int8_t)SORT_X_HOME_DIR;
+  AxisHome_ResetDebounce();
+
   SortingTask_ApplyMotionConfig();
 }
 
@@ -333,19 +473,27 @@ uint8_t SortingTask_Submit(const SortMission_t *mission)
   }
 
   if ((StepperMotor_IsPositionValid(STEPPER_X) == 0U) ||
+#if SORT_ENABLE_Y_AXIS
       (StepperMotor_IsPositionValid(STEPPER_Y) == 0U) ||
+#endif
       (StepperMotor_IsPositionValid(STEPPER_T) == 0U))
   {
     error_code = SORT_ERR_NOT_READY;
     return 0U;
   }
 
-  if ((StepperMotor_IsTargetValid(STEPPER_X, mission->pick_x_step) == 0U) ||
-      (StepperMotor_IsTargetValid(STEPPER_Y, mission->pick_y_step) == 0U))
+  if (StepperMotor_IsTargetValid(STEPPER_X, mission->pick_x_step) == 0U)
   {
     error_code = SORT_ERR_COORD;
     return 0U;
   }
+#if SORT_ENABLE_Y_AXIS
+  if (StepperMotor_IsTargetValid(STEPPER_Y, mission->pick_y_step) == 0U)
+  {
+    error_code = SORT_ERR_COORD;
+    return 0U;
+  }
+#endif
 
 #if SORT_BOX_ID_ONE_BASED
   if ((mission->box_id < 1U) || (mission->box_id > SORT_T_BOX_COUNT))
@@ -371,6 +519,9 @@ uint8_t SortingTask_Submit(const SortMission_t *mission)
 
   /* READY 状态下夹爪应已张开；这里再发一次，确保下降前处于张开状态。 */
   ServoGripper_Open();
+
+  /* 标定模式的慢速点动会临时改过 X/Y 速度，接任务前恢复正式参数。 */
+  SortingTask_ApplyXYMotionConfig();
 
   if (SortingTask_StartPickMove() == 0U)
   {
@@ -489,33 +640,128 @@ void SortingTask_Process(void)
   switch (state)
   {
     case SORT_SYS_INIT:
-      /* 上电先把 Z 抬到运输高度并张开夹爪，再开始 T 轴回零。 */
+      /* 上电先把 Z 抬到运输高度并张开夹爪，再开始 X/Y/T 回零。 */
       ZServo_Travel();
       ServoGripper_Open();
       SortingTask_Enter(SORT_SYS_HOMING);
       break;
 
     case SORT_SYS_HOMING:
-#if SORT_ASSUME_XY_ORIGIN
-      /* 故障/软停时 StopAll 会关闭 X/Y 使能；回零期间重新保持，
-       * 防止 T 找零时龙门被外力推走。 */
+      /* 2026-10-26 起 X/Y 有真实零点开关（X=PD6、Y=PD5），
+       * 顺序固定为 X -> Y（SORT_ENABLE_Y_AXIS=1 时）-> T。
+       * 先把位置全部作废，回零没完成前不接受任务。 */
       StepperMotor_Enable(STEPPER_X, 1U);
-      StepperMotor_Enable(STEPPER_Y, 1U);
-#endif
+      StepperMotor_InvalidatePosition(STEPPER_X);
       StepperMotor_InvalidatePosition(STEPPER_T);
-      StepperMotor_SetAcceleration(STEPPER_T, SORT_T_ACCEL_STEPS_S2);
-      StepperMotor_SetSpeed(STEPPER_T, SORT_T_HOME_SPEED_STEPS_S);
-      home_active_seen = 0U;
-      home_release_seen = 0U;
-      if (StepperMotor_JogStart(STEPPER_T,
-                                (int8_t)SORT_T_HOME_DIR) != HAL_OK)
+#if SORT_ENABLE_Y_AXIS
+      StepperMotor_Enable(STEPPER_Y, 1U);
+      StepperMotor_InvalidatePosition(STEPPER_Y);
+#else
+      /* Y 暂不启用：确保驱动器不使能，回零期间也不会被误带动。 */
+      StepperMotor_Enable(STEPPER_Y, 0U);
+#endif
+      if (SortingTask_StartAxisHoming(STEPPER_X, AXIS_HOME_X,
+                                      (int8_t)SORT_X_HOME_DIR) == 0U)
       {
         SortingTask_Fail(SORT_ERR_HOMING);
-        break;
       }
-      ZServo_Travel();
-      ServoGripper_Open();
-      SortingTask_Enter(SORT_T_HOMING_SEARCH);
+      break;
+
+    case SORT_XY_HOMING_SEARCH:
+      /* 第一段：慢速压向零点开关，触发后立即停，不硬顶机械端。 */
+      if (AxisHome_TriggeredDebounced(homing_home,
+                                      SORT_XY_HOME_DEBOUNCE_MS) != 0U)
+      {
+        StepperMotor_Stop(homing_axis);
+        StepperMotor_SetSpeed(homing_axis,
+                              SORT_XY_HOME_BACKOFF_SPEED_STEPS_S);
+        AxisHome_ResetDebounce();
+        if (StepperMotor_JogStart(homing_axis,
+                                  (int8_t)(-homing_dir)) != HAL_OK)
+        {
+          SortingTask_Fail(SORT_ERR_HOMING);
+          break;
+        }
+        SortingTask_Enter(SORT_XY_HOMING_BACKOFF);
+      }
+      else if (SortingTask_HomeExceededMaxSteps() != 0U)
+      {
+        /* 走超过“行程 + 2000 步”还没触发：开关没接/接错或方向反，
+         * 这时电机多半已经顶在机械端失步，立即停。 */
+        SortingTask_Fail(SORT_ERR_HOMING);
+      }
+      else if (SortingTask_Elapsed(SORT_XY_HOME_TIMEOUT_MS) != 0U)
+      {
+        /* 走完整行程还没压到开关：开关断线/没接，或回零方向设反。 */
+        SortingTask_Fail(SORT_ERR_HOMING);
+      }
+      else if (StepperMotor_IsBusy(homing_axis) == 0U)
+      {
+        SortingTask_Fail(SORT_ERR_HOMING);
+      }
+      break;
+
+    case SORT_XY_HOMING_BACKOFF:
+      /* 第二段：反向退让到开关释放，保证下一段是“从外侧压进来”。 */
+      if (AxisHome_ReleasedDebounced(homing_home,
+                                     SORT_XY_HOME_DEBOUNCE_MS) != 0U)
+      {
+        StepperMotor_Stop(homing_axis);
+        StepperMotor_SetSpeed(homing_axis,
+                              SORT_XY_HOME_APPROACH_SPEED_STEPS_S);
+        AxisHome_ResetDebounce();
+        if (StepperMotor_JogStart(homing_axis, homing_dir) != HAL_OK)
+        {
+          SortingTask_Fail(SORT_ERR_HOMING);
+          break;
+        }
+        SortingTask_Enter(SORT_XY_HOMING_APPROACH);
+      }
+      else if (SortingTask_HomeExceededMaxSteps() != 0U)
+      {
+        /* 反向走超过“行程 + 2000 步”还没释放：开关卡在低电平（接成
+         * 常闭/短路）或方向反。停机，别继续往另一头机械端顶。 */
+        SortingTask_Fail(SORT_ERR_HOMING);
+      }
+      else if (SortingTask_Elapsed(SORT_XY_HOME_TIMEOUT_MS) != 0U)
+      {
+        /* 反向走满行程还没释放：开关卡死/短路，或回零方向设反。 */
+        SortingTask_Fail(SORT_ERR_HOMING);
+      }
+      else if (StepperMotor_IsBusy(homing_axis) == 0U)
+      {
+        SortingTask_Fail(SORT_ERR_HOMING);
+      }
+      break;
+
+    case SORT_XY_HOMING_APPROACH:
+      /* 第三段：慢速二次触发，这个边沿就是该轴 0 点。 */
+      if (AxisHome_TriggeredDebounced(homing_home,
+                                      SORT_XY_HOME_DEBOUNCE_MS) != 0U)
+      {
+        StepperMotor_Stop(homing_axis);
+        SortingTask_FinishAxisHoming(homing_axis);
+#if SORT_ENABLE_Y_AXIS
+        if (homing_axis == STEPPER_X)
+        {
+          if (SortingTask_StartAxisHoming(STEPPER_Y, AXIS_HOME_Y,
+                                          (int8_t)SORT_Y_HOME_DIR) == 0U)
+          {
+            SortingTask_Fail(SORT_ERR_HOMING);
+          }
+          break;
+        }
+#endif
+        SortingTask_StartTurretHoming();
+      }
+      else if (SortingTask_Elapsed(SORT_XY_HOME_TIMEOUT_MS) != 0U)
+      {
+        SortingTask_Fail(SORT_ERR_HOMING);
+      }
+      else if (StepperMotor_IsBusy(homing_axis) == 0U)
+      {
+        SortingTask_Fail(SORT_ERR_HOMING);
+      }
       break;
 
     case SORT_T_HOMING_SEARCH:
@@ -802,4 +1048,63 @@ SortError_t SortingTask_GetError(void)
 uint8_t SortingTask_HasMission(void)
 {
   return has_mission;
+}
+
+/* ---------------- 投放口标定（STM32 侧保存） ---------------- */
+
+/* 把当前 X/Y 位置存成投放口坐标。
+ * 只有在“该轴已回零、当前空闲、位置在软限位内”时才接受，
+ * 避免在运动途中按键把中间位置记成投放口。
+ * 成功/失败都从 USART3 打印，台架没有上位机也能判断按键有没有生效。 */
+static uint8_t SortingTask_SaveDropAxis(StepperAxis_t axis, int32_t *target,
+                                        const char *label)
+{
+  int32_t step;
+  uint8_t ok = 0U;
+
+  if ((StepperMotor_IsPositionValid(axis) != 0U) &&
+      (StepperMotor_IsBusy(axis) == 0U))
+  {
+    step = StepperMotor_GetPosition(axis);
+    if (StepperMotor_IsTargetValid(axis, step) != 0U)
+    {
+      *target = step;
+      ok = 1U;
+    }
+  }
+
+#if SORT_DEBUG_UART
+  if (ok != 0U)
+  {
+    DebugUart_WriteInt(label, *target);
+  }
+  else
+  {
+    DebugUart_Write(label);
+    DebugUart_Write("REJECT\r\n");
+  }
+#else
+  (void)label;
+#endif
+  return ok;
+}
+
+uint8_t SortingTask_SaveDropX(void)
+{
+  return SortingTask_SaveDropAxis(STEPPER_X, &drop_x_step, "DROP_X=");
+}
+
+uint8_t SortingTask_SaveDropY(void)
+{
+  return SortingTask_SaveDropAxis(STEPPER_Y, &drop_y_step, "DROP_Y=");
+}
+
+int32_t SortingTask_GetDropX(void)
+{
+  return drop_x_step;
+}
+
+int32_t SortingTask_GetDropY(void)
+{
+  return drop_y_step;
 }

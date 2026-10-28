@@ -419,6 +419,11 @@
               <FileType>1</FileType>
               <FilePath>../Service/safety_manager.c</FilePath>
             </File>
+            <File>
+              <FileName>debug_uart.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Service/debug_uart.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -448,6 +453,11 @@
               <FileName>hall_sensor.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Drivers/hall_sensor.c</FilePath>
+            </File>
+            <File>
+              <FileName>axis_home.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Drivers/axis_home.c</FilePath>
             </File>
           </Files>
         </Group>

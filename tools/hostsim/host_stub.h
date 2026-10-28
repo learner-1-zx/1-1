@@ -34,6 +34,13 @@ extern uint32_t     host_pwm_z_start;      /* TIM2_CH2：Z 轴舵机（PA1） */
 extern uint32_t     host_pwm_grip_start;   /* TIM1_CH1：夹爪舵机（PA8） */
 extern uint32_t     host_pwm_start_it;     /* HAL_TIM_PWM_Start_IT 调用次数（应为 0） */
 extern uint8_t      host_hall_level;       /* 仿真用 PD12/T_HOME 电平：0 = 低（有磁铁），1 = 高 */
+extern uint8_t      host_home_level[2];    /* 仿真用零点开关电平：[0]=X/PD6，[1]=Y/PD5；0 = 低（压到），1 = 高 */
+extern uint32_t     host_gpio_init_calls;  /* HAL_GPIO_Init 调用次数 */
+extern uint32_t     host_gpio_pa8_mode;    /* PA8 最近一次 HAL_GPIO_Init 的 Mode */
+extern uint32_t     host_gpio_pa8_pull;    /* PA8 最近一次 HAL_GPIO_Init 的 Pull */
+extern uint32_t     host_gpio_pa8_af;      /* PA8 最近一次 HAL_GPIO_Init 的 Alternate */
+extern uint8_t      host_gpio_pa8_level;   /* PA8 最近一次 HAL_GPIO_WritePin 的电平 */
+extern uint32_t     host_gpio_pa8_mode_at_pwm_start; /* 启动 TIM1_CH1 瞬间的 PA8 模式 */
 
 /* 外设句柄实体：仿真时用普通内存代替寄存器。 */
 extern TIM_TypeDef host_tim1_regs;

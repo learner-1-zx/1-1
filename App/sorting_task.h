@@ -5,7 +5,8 @@
 #include <stdint.h>
 
 /* 分拣任务状态机：
- * 初始化/T 轴回零完成后进入 READY，收到任务后依次执行
+ * 初始化后按 X 回零 -> Y 回零（SORT_ENABLE_Y_AXIS=1 时）-> T 轴回零，
+ * 完成后进入 READY；收到任务后依次执行
  * XY 取料 -> Z 接近 -> 开爪 -> Z 下降 -> 闭爪 -> Z 抬升 + T 转动
  * -> XY 投放 -> 等 T 到位 -> 开爪 -> 回安全位。
  * 急停和普通错误状态需要外部复位，复位后重新回零。 */
@@ -30,7 +31,12 @@ typedef enum
   SORT_RETURN_SAFE,
   SORT_TASK_DONE,
   SORT_ERROR,
-  SORT_EMERGENCY_STOP
+  SORT_EMERGENCY_STOP,
+  /* 2026-10-26 新增：X/Y 零点开关回零。追加在末尾，保证前面状态的
+   * 枚举值不变（0x84 状态事件直接发这个值，上位机可能有映射）。 */
+  SORT_XY_HOMING_SEARCH,
+  SORT_XY_HOMING_BACKOFF,
+  SORT_XY_HOMING_APPROACH
 } SortingState_t;
 
 /* 错误码与协议 ERROR 事件（0x83）的 detail 字段对应。 */
@@ -69,5 +75,14 @@ SortError_t SortingTask_GetError(void);
 /* 是否还有正在执行（或已提交等待执行）的分拣任务。
  * 台架按键用它判断“不抢自动流程”：任务执行期间返回 1。 */
 uint8_t SortingTask_HasMission(void);
+
+/* 投放口（drop）坐标由 STM32 自己保存，不走上位机：
+ * 初值取 sorting_config.h 的 SORT_DROP_X_STEP / SORT_DROP_Y_STEP，
+ * 标定模式下可以用按键把当前轴位置写进来（RAM，掉电丢失）。
+ * 保存失败（轴未回零、正在运动或超出软限位）返回 0。 */
+uint8_t SortingTask_SaveDropX(void);
+uint8_t SortingTask_SaveDropY(void);
+int32_t SortingTask_GetDropX(void);
+int32_t SortingTask_GetDropY(void);
 
 #endif

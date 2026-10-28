@@ -6,6 +6,7 @@
 #include "servo_z.h"
 #include "servo_gripper.h"
 #include "hall_sensor.h"
+#include "axis_home.h"
 #include "sorting_config.h"
 #include <stdio.h>
 #include <string.h>
@@ -255,12 +256,12 @@ static void test_z_servo(void)
 
   ZServo_SetPulse(500U);
   CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_MIN_US,
-        "below range is clamped to 1000 us");
+        "below range is clamped to 1200 us");
   CHECK(ZServo_GetPulse() == ZSERVO_PULSE_MIN_US, "reported pulse follows clamp");
 
-  ZServo_SetPulse(2500U);
+  ZServo_SetPulse(3000U);
   CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_MAX_US,
-        "above range is clamped to 2000 us");
+        "above range is clamped to 2500 us");
 
   ZServo_SetPulse(1750U);
   CHECK(host_tim2_regs.CCR2 == 1750U, "in range pulse is written unchanged");
@@ -278,6 +279,41 @@ static void test_z_servo(void)
   CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_TRAVEL_US,
         "safe position is the travel height");
 
+  /* 台架点动接口（2026-10-27 为 Z 轴齿条啮合标定新增）：
+   * 每调用一次改变 ZSERVO_STEP_US，到达限幅边界后停住；
+   * 正式模式窗口 1000~2000 us，标定模式 800~2200 us，这里都用宏比较。 */
+  ZServo_SetPulse(ZSERVO_PULSE_TRAVEL_US);
+  ZServo_StepPulse(+1);
+  CHECK(host_tim2_regs.CCR2 == (ZSERVO_PULSE_TRAVEL_US + ZSERVO_STEP_US),
+        "StepPulse(+1) adds one ZSERVO_STEP_US");
+  ZServo_StepPulse(-1);
+  CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_TRAVEL_US,
+        "StepPulse(-1) subtracts one ZSERVO_STEP_US");
+  ZServo_SetPulse(ZSERVO_PULSE_MAX_US);
+  ZServo_StepPulse(+1);
+  CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_MAX_US,
+        "StepPulse(+1) stops at the upper limit");
+  ZServo_SetPulse(ZSERVO_PULSE_MIN_US);
+  ZServo_StepPulse(-1);
+  CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_MIN_US,
+        "StepPulse(-1) stops at the lower limit");
+  ZServo_StepPulse(0);
+  CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_MIN_US,
+        "StepPulse(0) leaves the pulse unchanged");
+
+  /* 一键到位（2026-10-27 实测：最上 1200 us / 最下 2500 us）。
+   * 台架按键 ZSERVO_BENCH_KEY2/3_JUMP=1 时 KEY2 到最下面、KEY3 到最上面。 */
+  ZServo_JumpTo(ZSERVO_PULSE_BOTTOM_US);
+  CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_BOTTOM_US,
+        "JumpTo(BOTTOM) writes 2500 us directly");
+  ZServo_JumpTo(ZSERVO_PULSE_TOP_US);
+  CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_TOP_US,
+        "JumpTo(TOP) writes 1200 us directly");
+  CHECK(ZSERVO_PULSE_TOP_US == 1200U, "measured TOP endpoint is 1200 us");
+  CHECK(ZSERVO_PULSE_BOTTOM_US == 2500U, "measured BOTTOM endpoint is 2500 us");
+  CHECK(ZSERVO_PULSE_TOP_US < ZSERVO_PULSE_BOTTOM_US,
+        "TOP pulse is smaller than BOTTOM pulse (smaller pulse = higher)");
+
   CHECK((ZSERVO_PULSE_TRAVEL_US < ZSERVO_PULSE_APPROACH_US) &&
         (ZSERVO_PULSE_APPROACH_US < ZSERVO_PULSE_GRASP_US),
         "height order is TRAVEL < APPROACH < GRASP");
@@ -285,60 +321,102 @@ static void test_z_servo(void)
 
 static void test_gripper_servo(void)
 {
-  /* BDS300 2026-10-20 实测：闭合临界 1390 us、张开临界 1800 us，
-   * 正式值各留 20 us 余量（1410/1780）；换舵机后同步修改这里。
-   * 上电 ServoGripper_Init() 不启动 PWM、不写 CCR1：夹爪位置由状态机
-   * 在 SORT_SYS_INIT 里调用 Open() 决定，避免先摆到 1500 us 再张开。
+  uint32_t i;
+  uint32_t starts;
+
+  /* BDS300 2026-10-25 重新标定：闭合临界 1400 us、张开临界 1750 us，
+   * 正式值各留 20 us 余量（1420/1730）；换舵机后同步修改这里。
+   * 2026-10-23 软启动：Init() 不启动 PWM、不写 CCR1，软件脉宽从安全中位
+   * 1500 us 开始；第一次 Open()/Close() 先以 1500 us 启动 PWM，再由
+   * Process() 按 50 us / 20 ms 缓动到目标，避免一帧跳 310 us 撞进端点。
    * 当前夹爪用 PA8 / TIM1_CH1 硬件 PWM，不再需要更新/比较中断。 */
-  printf("test 8: gripper servo TIM1_CH1 (PA8) hardware PWM\n");
+  printf("test 8: gripper servo TIM1_CH1 (PA8) hardware PWM + soft start\n");
   host_reset();
   htim1.Instance = &host_tim1_regs;
 
   CHECK(SERVO_PWM_Pin == GPIO_PIN_8, "gripper PWM pin must be PA8");
   CHECK(SERVO_PWM_GPIO_Port == GPIOA, "gripper PWM port must be GPIOA");
+  CHECK((SERVO_GRIPPER_START_PULSE_US > SERVO_GRIPPER_MIN_PULSE_US) &&
+        (SERVO_GRIPPER_START_PULSE_US < SERVO_GRIPPER_MAX_PULSE_US),
+        "safe start pulse sits strictly inside the 1400~1750 us window");
 
   ServoGripper_Init();
   CHECK(host_pwm_grip_start == 0U,
-        "ServoGripper_Init no longer starts TIM1 channel 1");
+        "ServoGripper_Init does not start TIM1 channel 1");
   CHECK(host_pwm_z_start == 0U, "gripper init does not touch TIM2");
   CHECK(host_pwm_start_it == 0U,
         "gripper uses hardware PWM, not update/compare interrupts");
   CHECK(host_delay_ms == 0U, "ServoGripper_Init no longer blocks");
   CHECK(host_tim1_regs.CCR1 == 0U,
-        "power-on leaves CCR1 untouched (no 1500 us intermediate position)");
-  CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_OPEN_PULSE_US,
-        "driver state starts from the open pulse");
+        "power-on leaves CCR1 untouched (no output while LCD_Init runs)");
+  CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_START_PULSE_US,
+        "driver state starts from the safe mid pulse, not the end stop");
   CHECK(ServoGripper_IsClosed() == 0U, "gripper reports open after init");
+  CHECK(host_gpio_pa8_mode == GPIO_MODE_OUTPUT_PP,
+        "Init parks PA8 as a push-pull output (no floating servo signal)");
+  CHECK(host_gpio_pa8_pull == GPIO_PULLDOWN,
+        "parked PA8 has an internal pull-down");
+  CHECK(host_gpio_pa8_level == 0U,
+        "parked PA8 is driven low, same as an unplugged signal wire");
 
-  /* 上电后第一件事就是按 KEY1 的场景：JumpTo 必须自己补启动 PWM，
-   * 并且第一帧就是目标脉宽（不能先输出 1500 或旧值）。 */
-  ServoGripper_JumpTo(SERVO_GRIPPER_CLOSE_PULSE_US, 1U);
-  CHECK(host_pwm_grip_start == 1U,
-        "first JumpTo starts TIM1 channel 1 when PWM is not running");
-  CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_CLOSE_PULSE_US,
-        "first JumpTo writes the close pulse to CCR1");
-  CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_CLOSE_PULSE_US,
-        "reported pulse follows the first JumpTo");
-  CHECK(ServoGripper_IsClosed() == 1U,
-        "first JumpTo updates the closed flag (closed)");
-
+  /* 上电后第一次 Open()：启动 PWM，但第一帧必须是安全中位 1500 us，
+   * 不能像以前那样直接写 1730 us（一帧跳完 310 us 行程）。 */
   ServoGripper_Open();
   CHECK(host_pwm_grip_start == 1U,
-        "Open reuses the already running PWM (no double start)");
+        "first Open starts TIM1 channel 1 when PWM is not running");
+  CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_START_PULSE_US,
+        "first Open energises at the safe mid pulse, not at the open end stop");
+  CHECK(host_gpio_pa8_mode == GPIO_MODE_AF_PP,
+        "first Open hands PA8 back to alternate function mode");
+  CHECK(host_gpio_pa8_af == GPIO_AF1_TIM1,
+        "PA8 alternate function is TIM1_CH1");
+  CHECK(host_gpio_pa8_mode_at_pwm_start == GPIO_MODE_AF_PP,
+        "PA8 is already AF1 when the PWM starts (no floating first frame)");
+  CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_START_PULSE_US,
+        "Open only retargets, the slew loop moves the pulse");
+  CHECK(ServoGripper_IsClosed() == 0U, "Open reports open");
+
+  /* 缓动节拍：20 ms 未到不动，到了才走 SERVO_GRIPPER_SLEW_US。 */
+  host_tick_ms += (SERVO_GRIPPER_SLEW_PERIOD_MS - 1U);
+  ServoGripper_Process();
+  CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_START_PULSE_US,
+        "no slew step before the 20 ms period elapses");
+  host_tick_ms += 1U;
+  ServoGripper_Process();
+  CHECK(ServoGripper_GetPulse() ==
+            (uint16_t)(SERVO_GRIPPER_START_PULSE_US + SERVO_GRIPPER_SLEW_US),
+        "one slew step changes the pulse by SERVO_GRIPPER_SLEW_US");
+
+  for (i = 0U; i < 16U; ++i)
+  {
+    host_tick_ms += SERVO_GRIPPER_SLEW_PERIOD_MS;
+    ServoGripper_Process();
+  }
   CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_OPEN_PULSE_US,
-        "Open writes the open pulse to CCR1");
+        "slew reaches the open pulse and stops there");
   CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_OPEN_PULSE_US,
-        "reported pulse follows Open");
+        "reported pulse follows the slew");
+  CHECK(host_pwm_grip_start == 1U,
+        "Open reuses the already running PWM (no double start)");
   CHECK(ServoGripper_IsClosed() == 0U, "gripper reports open");
 
+  /* 闭合同样是缓动：先不跳变，到位后 CCR1 才是 1420 us。 */
   ServoGripper_Close();
+  CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_OPEN_PULSE_US,
+        "Close retargets instead of jumping to the close pulse");
+  CHECK(ServoGripper_IsClosed() == 1U,
+        "Close updates the closed flag immediately");
+  for (i = 0U; i < 16U; ++i)
+  {
+    host_tick_ms += SERVO_GRIPPER_SLEW_PERIOD_MS;
+    ServoGripper_Process();
+  }
   CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_CLOSE_PULSE_US,
-        "Close writes the close pulse to CCR1");
+        "slew reaches the close pulse and stops there");
   CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_CLOSE_PULSE_US,
         "reported pulse follows Close");
-  CHECK(ServoGripper_IsClosed() == 1U, "gripper reports closed");
 
-  /* 台架按键一次到位：JumpTo 直接写 CCR1，不经过 5 us/20 ms 缓动。 */
+  /* 台架按键一次到位：JumpTo 仍直接写 CCR1，不经过缓动。 */
   ServoGripper_JumpTo(SERVO_GRIPPER_MAX_PULSE_US, 0U);
   CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_MAX_PULSE_US,
         "JumpTo writes the requested pulse to CCR1 immediately");
@@ -349,17 +427,32 @@ static void test_gripper_servo(void)
 
   ServoGripper_JumpTo(1000U, 1U);
   CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_MIN_PULSE_US,
-        "JumpTo clamps below the measured 1390 us mechanical window");
+        "JumpTo clamps below the measured 1400 us mechanical window");
   CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_MIN_PULSE_US,
         "reported pulse follows the JumpTo clamp");
   CHECK(ServoGripper_IsClosed() == 1U,
         "JumpTo updates the closed flag (closed)");
 
-  CHECK((SERVO_GRIPPER_OPEN_PULSE_US - SERVO_GRIPPER_CLOSE_PULSE_US) == 370U,
-        "open-close travel is 370 us (410 us measured, 20 us margin each side)");
+  /* 台架场景：上电后（PWM 未启动）第一次按键直接 JumpTo，也必须自动补启动。 */
+  starts = host_pwm_grip_start;
+  ServoGripper_Init();
+  CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_START_PULSE_US,
+        "re-Init returns the driver state to the safe mid pulse");
+  ServoGripper_JumpTo(SERVO_GRIPPER_CLOSE_PULSE_US, 1U);
+  CHECK(host_pwm_grip_start == (starts + 1U),
+        "first JumpTo after power-on starts TIM1 channel 1");
+  CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_CLOSE_PULSE_US,
+        "first JumpTo writes the requested pulse to CCR1");
+  CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_CLOSE_PULSE_US,
+        "first JumpTo updates the reported pulse");
+  CHECK(ServoGripper_IsClosed() == 1U,
+        "first JumpTo updates the closed flag");
+
+  CHECK((SERVO_GRIPPER_OPEN_PULSE_US - SERVO_GRIPPER_CLOSE_PULSE_US) == 310U,
+        "open-close travel is 310 us (350 us measured, 20 us margin each side)");
   CHECK((SERVO_GRIPPER_CLOSE_PULSE_US >= SERVO_GRIPPER_MIN_PULSE_US) &&
         (SERVO_GRIPPER_OPEN_PULSE_US <= SERVO_GRIPPER_MAX_PULSE_US),
-        "both positions stay inside the measured 1390~1800 us window");
+        "both positions stay inside the measured 1400~1750 us window");
 }
 
 /* 霍尔开关接 PD12/T_HOME：内部上拉，低有效（有磁铁 = 低）。
@@ -426,9 +519,98 @@ static void test_turret_bin_math(void)
         "six bin pitches sum to exactly one revolution");
 }
 
+/* X/Y 零点限位开关：X=PD6、Y=PD5，NO→IO、C→GND，内部上拉、低有效。
+ * 仿真只验证引脚映射、极性换算和消抖计时；真实电平必须上电后用
+ * 万用表在 PD6/PD5 上量（未压到约 3.3 V，压到约 0 V）。 */
+static void test_axis_home(void)
+{
+  printf("test 11: axis home switches PD6(X)/PD5(Y), active low + debounce\n");
+
+  host_reset();
+  AxisHome_ResetDebounce();
+
+  CHECK((X_HOME_GPIO_Port == GPIOD) && (X_HOME_Pin == GPIO_PIN_6),
+        "X home switch is mapped to PD6");
+  CHECK((Y_HOME_GPIO_Port == GPIOD) && (Y_HOME_Pin == GPIO_PIN_5),
+        "Y home switch is mapped to PD5");
+  CHECK(AXIS_HOME_ACTIVE_HIGH == 0,
+        "home switches are active low (NO to GND)");
+
+  CHECK(AxisHome_ReadRaw(AXIS_HOME_X) == GPIO_PIN_SET,
+        "X idle: PD6 is pulled high");
+  CHECK(AxisHome_IsTriggered(AXIS_HOME_X) == 0U,
+        "X idle: reports not triggered");
+
+  host_home_level[0] = 0U;
+  CHECK(AxisHome_ReadRaw(AXIS_HOME_X) == GPIO_PIN_RESET,
+        "X pressed: PD6 is pulled low");
+  CHECK(AxisHome_IsTriggered(AXIS_HOME_X) == 1U,
+        "X pressed: reports triggered");
+
+  /* 消抖：刚变低不算触发，连续 15 ms 才算。 */
+  AxisHome_ResetDebounce();
+  host_tick_ms = 1000U;
+  CHECK(AxisHome_TriggeredDebounced(AXIS_HOME_X,
+                                    SORT_XY_HOME_DEBOUNCE_MS) == 0U,
+        "first sample only opens the debounce window");
+  host_tick_ms = 1014U;
+  CHECK(AxisHome_TriggeredDebounced(AXIS_HOME_X,
+                                    SORT_XY_HOME_DEBOUNCE_MS) == 0U,
+        "14 ms is shorter than the 15 ms debounce");
+  host_tick_ms = 1015U;
+  CHECK(AxisHome_TriggeredDebounced(AXIS_HOME_X,
+                                    SORT_XY_HOME_DEBOUNCE_MS) == 1U,
+        "15 ms of continuous low is a valid trigger");
+
+  /* 中途抖回高电平：计时必须重新开始。 */
+  host_home_level[0] = 1U;
+  CHECK(AxisHome_TriggeredDebounced(AXIS_HOME_X,
+                                    SORT_XY_HOME_DEBOUNCE_MS) == 0U,
+        "release clears the trigger debounce");
+  host_home_level[0] = 0U;
+  host_tick_ms = 1020U;
+  CHECK(AxisHome_TriggeredDebounced(AXIS_HOME_X,
+                                    SORT_XY_HOME_DEBOUNCE_MS) == 0U,
+        "bounce restarts the debounce window");
+  host_tick_ms = 1035U;
+  CHECK(AxisHome_TriggeredDebounced(AXIS_HOME_X,
+                                    SORT_XY_HOME_DEBOUNCE_MS) == 1U,
+        "clean 15 ms window is accepted again");
+
+  /* Y 轴独立计时：X 的消抖状态不能影响 Y。 */
+  host_home_level[1] = 0U;
+  AxisHome_ResetDebounce();
+  host_tick_ms = 2000U;
+  CHECK(AxisHome_TriggeredDebounced(AXIS_HOME_Y,
+                                    SORT_XY_HOME_DEBOUNCE_MS) == 0U,
+        "Y debounce starts independently");
+  host_tick_ms = 2015U;
+  CHECK(AxisHome_TriggeredDebounced(AXIS_HOME_Y,
+                                    SORT_XY_HOME_DEBOUNCE_MS) == 1U,
+        "Y trigger accepted after 15 ms");
+
+  /* 释放消抖：回零退让阶段用它确认已经离开开关。 */
+  host_home_level[0] = 1U;
+  AxisHome_ResetDebounce();
+  host_tick_ms = 3000U;
+  CHECK(AxisHome_ReleasedDebounced(AXIS_HOME_X,
+                                   SORT_XY_HOME_DEBOUNCE_MS) == 0U,
+        "release debounce starts");
+  host_tick_ms = 3015U;
+  CHECK(AxisHome_ReleasedDebounced(AXIS_HOME_X,
+                                   SORT_XY_HOME_DEBOUNCE_MS) == 1U,
+        "15 ms of continuous high is a valid release");
+
+  /* 非法轴编号必须安全返回，不能误判为已触发。 */
+  CHECK(AxisHome_IsTriggered(AXIS_HOME_COUNT) == 0U,
+        "invalid axis id never reports triggered");
+  CHECK(AxisHome_TriggeredDebounced(AXIS_HOME_COUNT, 15U) == 0U,
+        "invalid axis id debounce returns 0");
+}
+
 int main(void)
 {
-  printf("== host simulation for lcd_st7789 / servo_z / servo_gripper / hall_sensor ==\n");
+  printf("== host simulation for lcd_st7789 / servo_z / servo_gripper / hall_sensor / axis_home ==\n");
 
   test_fill_color();
   test_draw_image();
@@ -440,6 +622,7 @@ int main(void)
   test_gripper_servo();
   test_hall_sensor();
   test_turret_bin_math();
+  test_axis_home();
 
   printf("== checks=%d failures=%d ==\n", checks, failures);
   if (failures == 0)

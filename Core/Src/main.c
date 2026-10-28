@@ -30,12 +30,35 @@
 #include "servo_gripper.h"
 #include "servo_z.h"
 #include "lcd_st7789.h"
+#if SORT_DEBUG_UART
+#include "debug_uart.h"
+#endif
 
-/* 当前固件保留正式分拣逻辑，并提供台架按键：
- * KEY0 松开后直接到张开位、KEY1 松开后直接到闭合位，
- * KEY2/KEY3 在 READY 时单仓点动 T 轴（正/反，一次 60°），
- * 用于视觉未就绪时手动模拟夹爪和检查 6 仓对位；正式比赛把
- * SORT_ENABLE_BENCH_KEYS 置 0 即可完全关闭。 */
+/* 是否有台架按键需要“按住连发”：
+ *   - 夹爪标定（SORT_BENCH_KEY_JUMP=0）：KEY0/KEY1；
+ *   - Z 轴逐档标定（ZSERVO_BENCH_KEY2/3_JUMP=0）：对应的 KEY2/KEY3。
+ * 一次到位模式（JUMP=1）按下一次就跳到目标，不需要连发。 */
+#if (SORT_BENCH_KEY_JUMP == 0) || \
+    ((ZSERVO_CALIB_MODE != 0) && \
+     ((ZSERVO_BENCH_KEY2_JUMP == 0) || (ZSERVO_BENCH_KEY3_JUMP == 0)))
+#define BENCH_KEY_REPEAT_ENABLED        1
+#else
+#define BENCH_KEY_REPEAT_ENABLED        0
+#endif
+
+/* 正式分拣逻辑 + 台架按键（SORT_ENABLE_BENCH_KEYS = 1）：
+ * KEY0/KEY1 直接跳到张开位 1730 / 闭合位 1420 us（SORT_BENCH_KEY_JUMP = 1）；
+ * 夹爪标定（JUMP = 0 且 SERVO_GRIPPER_CALIB_MODE = 1）时改为每次 ±50 us，
+ * 按住可连发。
+ * KEY2/KEY3：ZSERVO_CALIB_MODE = 1（当前）时控制 Z 轴舵机高度：
+ *   当前两个键都是逐档测试（KEY2 +50 us、KEY3 -50 us，按住连发），
+ *   每次从 USART3 打印 Z_PULSE=。上端点 1200、下端点 2200 已实测，
+ *   需要一键到位时把 ZSERVO_BENCH_KEY2/3_JUMP 改成 1。
+ *   两种情况都在 ZSERVO_CALIB_MODE = 0 后恢复 X 轴点动（正/反，整圈）。
+ * SORT_XY_CALIB_MODE = 1（当前）时 KEY0 改为“按下即开爪 + 长按 1 s 存投放口 X”，
+ * KEY1 在 Y 未启用时仍闭合夹爪；X 轴点动改为慢速 SORT_CALIB_JOG_STEPS
+ * （被 Z 轴标定模式占用时不生效）。
+ * 正式比赛把 SORT_ENABLE_BENCH_KEYS 置 0 即可完全关闭手动入口。 */
 
 /*
  * 工程分层：
@@ -232,24 +255,61 @@ static uint8_t BenchKey_Allowed(void)
   return (SortingTask_HasMission() == 0U) ? 1U : 0U;
 }
 
-/* T 轴点动：KEY2 正向、KEY3 反向，一次走一个仓距（≈60°）。
- * 只在 READY 且 T 空闲时响应；点动后 T 位置标志被清除，
- * 必须重新回零（发 HOME 或复位）才能接收自动任务。
- * 这样可以在台架上逐个仓检查“仓口是否正对投放口”，
- * 又不会让标定后的错误坐标进入正式流程。 */
-static void BenchTurret_Jog(int8_t direction)
+/* X 轴点动：KEY2 正向、KEY3 反向。回零后位置是相对零点的绝对步数，
+ * 软限位会拦住越界；门控只要求 X 空闲（安全和“无任务”已在
+ * BenchKey_Allowed 里保证），避免前一次点动没走完就叠加新目标。
+ *
+ * SORT_XY_CALIB_MODE=1 时改为“标定步长 + 慢速”，方便对准投放口：
+ * 起步前把速度降到 SORT_CALIB_JOG_SPEED_STEPS_S，走完由
+ * BenchKey_Process 开头恢复正式速度。
+ *
+ * ZSERVO_CALIB_MODE=1（Z 轴齿条啮合标定）时 KEY2/KEY3 归 Z 轴脉宽用，
+ * 这一整段 X 轴点动代码不编译，避免“定义了却没调用”的告警。 */
+#if !ZSERVO_CALIB_MODE
+#if SORT_XY_CALIB_MODE
+static uint8_t calib_jog_slow;
+#endif
+
+static void BenchX_Jog(int8_t direction)
 {
-  if ((SortingTask_GetState() != SORT_SYS_READY) ||
-      (StepperMotor_IsBusy(STEPPER_T) != 0U))
+  int32_t steps;
+
+  if (StepperMotor_IsBusy(STEPPER_X) != 0U)
   {
     return;
   }
 
-  StepperMotor_InvalidatePosition(STEPPER_T);
-  (void)StepperMotor_MoveRelative(
-      STEPPER_T,
-      (int32_t)direction * (int32_t)SORT_BENCH_T_JOG_STEPS);
+#if SORT_XY_CALIB_MODE
+  steps = SORT_CALIB_JOG_STEPS;
+  StepperMotor_SetSpeed(STEPPER_X, SORT_CALIB_JOG_SPEED_STEPS_S);
+  StepperMotor_SetAcceleration(STEPPER_X, SORT_XY_ACCEL_STEPS_S2);
+  calib_jog_slow = 1U;
+#else
+  steps = SORT_BENCH_X_JOG_STEPS;
+#endif
+
+  (void)StepperMotor_MoveRelative(STEPPER_X, (int32_t)direction * steps);
 }
+#endif /* !ZSERVO_CALIB_MODE */
+
+/* 台架“张开夹爪”动作：KEY0 专用（一次到位/步进两种模式共用一份实现）。
+ * SORT_BENCH_KEY_JUMP=1 时直接跳到张开位（默认 1730 us，SORT_BENCH_KEY_AT_LIMIT=1
+ * 时用机械临界 1750 us）；=0 时按 SERVO_GRIPPER_STEP_US 步进张开。 */
+#if SORT_BENCH_KEY_JUMP
+static void BenchGripper_OpenAction(void)
+{
+#if SORT_BENCH_KEY_AT_LIMIT
+  ServoGripper_JumpTo(SERVO_GRIPPER_MAX_PULSE_US, 0U);
+#else
+  ServoGripper_JumpTo(SERVO_GRIPPER_OPEN_PULSE_US, 0U);
+#endif
+}
+#else
+static void BenchGripper_OpenAction(void)
+{
+  ServoGripper_StepOpening();
+}
+#endif
 
 static void BenchKey_Process(void)
 {
@@ -258,13 +318,38 @@ static void BenchKey_Process(void)
   static GPIO_PinState last_raw[4] = {
       GPIO_PIN_SET, GPIO_PIN_SET, GPIO_PIN_SET, GPIO_PIN_SET};
   static uint32_t changed_tick[4] = {0U, 0U, 0U, 0U};
+#if BENCH_KEY_REPEAT_ENABLED
+  /* 上一次执行动作的时刻：KEY1 夹爪标定（JUMP=0）、Z 轴步进标定（KEY2/KEY3）
+   * 按住不放时按这个节拍连发。KEY0 在投放口标定模式下不连发，见下面的条件。
+   * 没有按键需要连发时整个变量一起裁掉，避免“赋值未使用”告警。 */
+  static uint32_t last_action_tick[4] = {0U, 0U, 0U, 0U};
+#endif
+#if SORT_XY_CALIB_MODE
+  /* KEY0 短按/长按：按下即开爪并开始计时；按住满
+   * SORT_DROP_KEY_LONG_PRESS_MS 才执行一次“存投放口 X”，每次按住只存一次。
+   * 任务抢占按键（门控关闭）后 stable[0] 会回到释放态，下一轮顺带清状态。 */
+  static uint8_t key0_hold_active;
+  static uint8_t key0_long_fired;
+  static uint32_t key0_hold_tick;
+#endif
   uint8_t pressed[4] = {0U, 0U, 0U, 0U};
   static uint8_t initialized;
+  static uint32_t last_call_tick;
   static GPIO_TypeDef *const ports[4] = {
       KEY0_GPIO_Port, KEY1_GPIO_Port, KEY2_GPIO_Port, KEY3_GPIO_Port};
   static const uint16_t pins[4] = {KEY0_Pin, KEY1_Pin, KEY2_Pin, KEY3_Pin};
   uint32_t now = HAL_GetTick();
   uint32_t i;
+
+#if SORT_XY_CALIB_MODE && !ZSERVO_CALIB_MODE
+  /* 标定慢速点动已经走完：恢复正式速度，避免下一次自动任务也慢速。 */
+  if ((calib_jog_slow != 0U) && (StepperMotor_IsBusy(STEPPER_X) == 0U))
+  {
+    StepperMotor_SetSpeed(STEPPER_X, SORT_XY_MAX_SPEED_STEPS_S);
+    StepperMotor_SetAcceleration(STEPPER_X, SORT_XY_ACCEL_STEPS_S2);
+    calib_jog_slow = 0U;
+  }
+#endif
 
   /*
    * 先同步一次上电电平，避免按键在复位时已经按下却被误判为
@@ -277,9 +362,37 @@ static void BenchKey_Process(void)
       stable[i] = HAL_GPIO_ReadPin(ports[i], pins[i]);
       last_raw[i] = stable[i];
       changed_tick[i] = now;
+#if BENCH_KEY_REPEAT_ENABLED
+      last_action_tick[i] = now;
+#endif
     }
     initialized = 1U;
   }
+
+  /*
+   * 门控中断后恢复：任务执行期间主循环不调用本函数，stable/last_raw 可能
+   * 已经过期（例如按住 KEY0 时来了任务，任务结束后才恢复）。这里把四个键
+   * 重新同步成当前电平并清掉 KEY0 长按状态，避免恢复瞬间误开爪/误存投放口。
+   * 正常运行时主循环每轮都调用，间隔 < 1 ms，不会进入这个分支。
+   */
+  if ((last_call_tick != 0U) &&
+      ((uint32_t)(now - last_call_tick) > (SORT_BENCH_KEY_DEBOUNCE_MS * 5U)))
+  {
+    for (i = 0U; i < 4U; ++i)
+    {
+      stable[i] = HAL_GPIO_ReadPin(ports[i], pins[i]);
+      last_raw[i] = stable[i];
+      changed_tick[i] = now;
+#if BENCH_KEY_REPEAT_ENABLED
+      last_action_tick[i] = now;
+#endif
+    }
+#if SORT_XY_CALIB_MODE
+    key0_hold_active = 0U;
+    key0_long_fired = 0U;
+#endif
+  }
+  last_call_tick = now;
 
   for (i = 0U; i < 4U; ++i)
   {
@@ -304,23 +417,79 @@ static void BenchKey_Process(void)
   }
 
   /*
-   * 按键按下并稳定后执行一次动作：一次到位模式让手感接近真正的
-   * “按一下夹爪就动”，不需要等松开；标定模式同样是按一下走一步。
+   * 按键动作：一次到位模式按一下动一次；步进标定模式首次按下走一步，
+   * 按住不放则每 SORT_BENCH_KEY_REPEAT_MS 再走一步，省得为几步反复点击：
+   *   - 夹爪标定（SORT_BENCH_KEY_JUMP=0）：KEY0/KEY1 连发；
+   *     但投放口标定开启（SORT_XY_CALIB_MODE=1）时 KEY0 要留给长按计时，不连发；
+   *   - Z 轴步进标定（ZSERVO_BENCH_KEY_JUMP=0）：KEY2/KEY3 连发。
+   * Z 轴两个键当前都是逐档（ZSERVO_BENCH_KEY2/3_JUMP=0），按住连发；
+   * 改成 1 时对应的键只在按下沿一键到端点。
+   * 其余情况下 KEY2/KEY3（X 轴点动）也只在按下沿触发一次。
    */
   for (i = 0U; i < 4U; ++i)
   {
-    if (pressed[i] != 0U)
+    uint8_t act = pressed[i];
+
+#if BENCH_KEY_REPEAT_ENABLED
+    if ((act == 0U) && (stable[i] == GPIO_PIN_RESET) &&
+        ((uint32_t)(now - last_action_tick[i]) >= SORT_BENCH_KEY_REPEAT_MS))
     {
+      uint8_t repeatable = 0U;
+
+#if (SORT_BENCH_KEY_JUMP == 0)
+      /* 投放口标定开启（SORT_XY_CALIB_MODE=1）时 KEY0 走“短按开爪/长按存投放口”，
+       * 不参与连发，否则按住 1 s 会被连发不断重置计时，长按永远触发不了。 */
+      if ((i == 1U) || ((i == 0U) && (SORT_XY_CALIB_MODE == 0)))
+      {
+        repeatable = 1U;
+      }
+#endif
+#if (ZSERVO_CALIB_MODE != 0)
+      /* 只有“逐档”那一侧的键需要连发；一键到位只在按下沿跳一次。 */
+      if (((i == 2U) && (ZSERVO_BENCH_KEY2_JUMP == 0)) ||
+          ((i == 3U) && (ZSERVO_BENCH_KEY3_JUMP == 0)))
+      {
+        repeatable = 1U;
+      }
+#endif
+      if (repeatable != 0U)
+      {
+        act = 1U;
+      }
+    }
+#endif
+
+    if (act != 0U)
+    {
+#if BENCH_KEY_REPEAT_ENABLED
+      last_action_tick[i] = now;
+#endif
+#if SORT_XY_CALIB_MODE
+      /* 投放口标定：KEY0 按下即开爪并开始长按计时，长按满
+       * SORT_DROP_KEY_LONG_PRESS_MS 才存投放口 X（见函数末尾）；
+       * KEY1 在 Y 启用（SORT_ENABLE_Y_AXIS=1）时存当前 Y。 */
+      if (i == 0U)
+      {
+        BenchGripper_OpenAction();
+        key0_hold_active = 1U;
+        key0_long_fired = 0U;
+        key0_hold_tick = now;
+        continue;
+      }
+#if SORT_ENABLE_Y_AXIS
+      if (i == 1U)
+      {
+        (void)SortingTask_SaveDropY();
+        continue;
+      }
+#endif
+#endif
 #if SORT_BENCH_KEY_JUMP
       /* 一次到位：KEY0 直接到张开位，KEY1 直接到闭合位。
        * 视觉未就绪时用它手动模拟夹爪状态，不必按几十次。 */
       if (i == 0U)
       {
-#if SORT_BENCH_KEY_AT_LIMIT
-        ServoGripper_JumpTo(SERVO_GRIPPER_MAX_PULSE_US, 0U);
-#else
-        ServoGripper_JumpTo(SERVO_GRIPPER_OPEN_PULSE_US, 0U);
-#endif
+        BenchGripper_OpenAction();
       }
       else if (i == 1U)
       {
@@ -331,29 +500,87 @@ static void BenchKey_Process(void)
 #endif
       }
 #else
-      /* 标定模式：每次 10 us，用于逐步找机械临界。 */
+      /* 标定模式：每次 SERVO_GRIPPER_STEP_US（50 us，KEY0 加、KEY1 减），按住可连发。 */
       if (i == 0U)
       {
-        ServoGripper_StepOpening();
+        BenchGripper_OpenAction();
       }
       else if (i == 1U)
       {
         ServoGripper_StepClosing();
       }
 #endif
-      /* KEY2/KEY3 用于 T 轴单仓点动；只在 READY 且 T 空闲时生效。
-       * 与上面的夹爪按键门控不同，这里额外要求状态机已回零完成，
-       * 避免和上电回零的 Jog 抢同一根轴。 */
+      /* KEY2/KEY3：
+       *   ZSERVO_CALIB_MODE=1（Z 轴标定）：
+       *     KEY2 由 ZSERVO_BENCH_KEY2_JUMP 决定：0（当前）= 每次 +ZSERVO_STEP_US
+       *       （按住连发）；1 = 一键到最下面 ZSERVO_PULSE_BOTTOM_US（2200 us）；
+       *     KEY3 由 ZSERVO_BENCH_KEY3_JUMP 决定：0（当前）= 每次 -ZSERVO_STEP_US
+       *       （按住连发）；1 = 一键到最上面 ZSERVO_PULSE_TOP_US（1200 us）；
+       *   每次动作都从 USART3 打印 Z_PULSE=。
+       *   否则恢复 X 轴点动：KEY2 正向、KEY3 反向。回零后是绝对坐标，
+       *   MoveRelative 仍按当前位置累加；软限位由 stepper_motor.c 的
+       *   MoveTo 统一检查。 */
+#if ZSERVO_CALIB_MODE
       if (i == 2U)
       {
-        BenchTurret_Jog(+1);
+#if ZSERVO_BENCH_KEY2_JUMP
+        ZServo_JumpTo(ZSERVO_PULSE_BOTTOM_US);
+#else
+        ZServo_StepPulse(+1);
+#endif
+#if SORT_DEBUG_UART
+        DebugUart_WriteInt("Z_PULSE=", (int32_t)ZServo_GetPulse());
+#endif
       }
       else if (i == 3U)
       {
-        BenchTurret_Jog(-1);
+#if ZSERVO_BENCH_KEY3_JUMP
+        ZServo_JumpTo(ZSERVO_PULSE_TOP_US);
+#else
+        ZServo_StepPulse(-1);
+#endif
+#if SORT_DEBUG_UART
+        DebugUart_WriteInt("Z_PULSE=", (int32_t)ZServo_GetPulse());
+#endif
       }
+#else
+      if (i == 2U)
+      {
+        BenchX_Jog(+1);
+      }
+      else if (i == 3U)
+      {
+        BenchX_Jog(-1);
+      }
+#endif
     }
   }
+
+#if SORT_XY_CALIB_MODE
+  /* KEY0 长按判据：按住满 SORT_DROP_KEY_LONG_PRESS_MS 才存一次投放口。
+   * 按下那一轮刚把 key0_hold_tick 置成 now，所以这里不会立刻触发；
+   * key0_long_fired 保证“一次按住只存一次”，继续按住不刷串口。
+   * stable[0] 回到释放态（松手）时清状态，下次按下重新计时。 */
+  if (key0_hold_active != 0U)
+  {
+    /* 必须“消抖后仍是按下”且“当前原始电平也是按下”才算继续长按：
+     * 松开时原始电平立刻变高，这样 980~1000 ms 松手不会被误判成长按。 */
+    if ((stable[0] == GPIO_PIN_RESET) && (last_raw[0] == GPIO_PIN_RESET))
+    {
+      if ((key0_long_fired == 0U) &&
+          ((uint32_t)(now - key0_hold_tick) >= SORT_DROP_KEY_LONG_PRESS_MS))
+      {
+        key0_long_fired = 1U;
+        (void)SortingTask_SaveDropX();
+      }
+    }
+    else
+    {
+      key0_hold_active = 0U;
+      key0_long_fired = 0U;
+    }
+  }
+#endif
 }
 
 #endif /* SORT_ENABLE_BENCH_KEYS */

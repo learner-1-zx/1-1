@@ -15,6 +15,9 @@
 **/*.o
 **/*.sct
 
+# Host simulation build output
+tools/hostsim/*.exe
+
 # Keil user-specific files and logs
 *.uvguix.*
 *.uvoptx

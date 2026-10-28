@@ -29,10 +29,12 @@
 /* Configure GPIO                                                             */
 /*----------------------------------------------------------------------------*/
 /* 方向/使能/步进信号为推挽输出；Z 轴和夹爪舵机由定时器 AF 输出；
- * 急停、夹爪传感器、T_HOME 和台架按键为上拉输入。T_HOME（PD12）
- * 接转盘零位霍尔，开集电极低有效：有磁铁时被拉低。
+ * 急停、夹爪传感器、T_HOME、X_HOME/Y_HOME 和台架按键为上拉输入。
+ * T_HOME（PD12）接转盘零位霍尔，开集电极低有效：有磁铁时被拉低。
+ * X_HOME（PD6）/Y_HOME（PD5）接 X/Y 零点机械限位开关（NO→IO、C→GND），
+ * 也是内部上拉、低有效：压到零点开关时被拉低。
  * PD11 改名 SPARE_PD11，上拉备用；PD9、PD10 仍作为新增模块的
- * 优先扩展口，当前固件不配置；限位功能后续单独考虑。 */
+ * 优先扩展口，当前固件不配置；限位功能由 X_HOME/Y_HOME 实现。 */
 /* USER CODE BEGIN 1 */
 
 /* USER CODE END 1 */
@@ -95,8 +97,10 @@ void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pins : T_HOME_Pin EMERGENCY_STOP_Pin GRIP_SENSOR_Pin
+                           X_HOME_Pin Y_HOME_Pin
                            KEY0_Pin KEY1_Pin KEY2_Pin KEY3_Pin */
   GPIO_InitStruct.Pin = T_HOME_Pin|EMERGENCY_STOP_Pin|GRIP_SENSOR_Pin
+                          |X_HOME_Pin|Y_HOME_Pin
                           |KEY0_Pin|KEY1_Pin|KEY2_Pin|KEY3_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;

@@ -78,6 +78,10 @@ void Error_Handler(void);
 #define T_EN_GPIO_Port GPIOC
 #define T_HOME_Pin GPIO_PIN_12
 #define T_HOME_GPIO_Port GPIOD
+#define X_HOME_Pin GPIO_PIN_6
+#define X_HOME_GPIO_Port GPIOD
+#define Y_HOME_Pin GPIO_PIN_5
+#define Y_HOME_GPIO_Port GPIOD
 #define EMERGENCY_STOP_Pin GPIO_PIN_13
 #define EMERGENCY_STOP_GPIO_Port GPIOD
 #define GRIP_SENSOR_Pin GPIO_PIN_14
@@ -125,7 +129,10 @@ void Error_Handler(void);
 /* 显示屏：SPI2 + ST7789V2，SPI 引脚在 spi.c 中配置为复用功能，
  * CS/DC/RST/BLK 为普通 GPIO，由 lcd_st7789.c 控制。 */
 /* 传感器和台架按键输入均在 gpio.c 中配置为上拉，低电平表示触发；
- * T_HOME（PD12）同理：有磁铁时霍尔把 PD12 拉低。 */
+ * T_HOME（PD12）同理：有磁铁时霍尔把 PD12 拉低。
+ * X_HOME（PD6）/Y_HOME（PD5）是 X/Y 零点机械限位开关：NO 接 IO、
+ * C 接 GND，内部上拉，压到开关时被拉低（低有效）；回零流程在
+ * sorting_task.c，读取和消抖在 Drivers/axis_home.c。 */
 /* USER CODE BEGIN Private defines */
 
 /* USER CODE END Private defines */

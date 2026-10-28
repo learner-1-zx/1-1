@@ -10,7 +10,9 @@ typedef struct
   GPIO_TypeDef *en_port;
   uint16_t en_pin;
 
-  /* 以下字段会被主循环和 TIM6 中断同时访问，必须用 volatile。 */
+  /* 以下字段会被主循环和 TIM6 中断同时访问，必须用 volatile。
+   *volatile 关键字告诉编译器该变量可能在程序的其他地方被修改，
+   *防止编译器对其进行优化，从而确保每次访问都是从内存中读取最新的值。 */
   volatile int32_t position;
   volatile int32_t target;
   volatile uint8_t busy;
@@ -57,7 +59,7 @@ static StepperMotor_t motors[STEPPER_COUNT] =
     .step_active_low = 1U, .dir_invert = 0U, .en_active_low = 1U
   }
 };
-
+/*防止多任务或中断打断时的数据冲突*/
 static uint32_t StepperMotor_EnterCritical(void)
 {
   uint32_t primask = __get_PRIMASK();
@@ -419,14 +421,19 @@ HAL_StatusTypeDef StepperMotor_JogStart(StepperAxis_t axis, int8_t direction)
   primask = StepperMotor_EnterCritical();
   motor->pulse_high = 0U;
   StepperMotor_WriteStepPin(motor, 0U);
-  motor->target = (direction > 0) ? 0x7FFFFFF0 : -0x7FFFFFF0;
+  /* 目标设在 INT32 极限处：这样 remaining == total_steps，
+   * Tick 里 done = 0，Jog 才会真正走加速段（前 ramp_steps 步逐步
+   * 缩短间隔）后保持巡航速度。之前写 0x7FFFFFF0 会让 done = 15，
+   * 一开始就跳过加速分支，Jog 全程只有起步速度（设定值的一半），
+   * 长行程回零容易误判超时。 */
+  motor->target = (direction > 0) ? INT32_MAX : -INT32_MAX;
   motor->busy = 1U;
   motor->tick_count = 0U;
 
   /* 连续找开关时只保留加速段，不进入减速段：
    * 目标设在极远处，剩余步数远大于 ramp_steps，减速条件不会触发。
    * 这样 JogStart 也能从起步速度平滑加速到巡航速度。 */
-  motor->total_steps = 0x7FFFFFFF;
+  motor->total_steps = INT32_MAX;
   motor->ramp_steps_current = motor->ramp_steps;
   if ((motor->ramp_steps > 0U) &&
       (motor->start_interval > motor->cruise_interval))
@@ -579,7 +586,8 @@ void StepperMotor_Tick(void)
                             ? (uint16_t)(motor->step_interval - 1U) : 0U;
 
     /* 线性加减速：前 ramp_steps 步逐步缩短间隔，最后 ramp_steps 步拉长。
-     * 只对 MoveTo 生效；JogStart 的 ramp_steps_current 为 0，保持匀速。 */
+     * MoveTo 两段都会走；JogStart 的目标极远，只会走完加速段后匀速，
+     * 不会进入减速段。 */
     if ((motor->ramp_steps_current > 0U) && (motor->interval_step > 0U))
     {
       delta = (int64_t)motor->target - (int64_t)motor->position;
