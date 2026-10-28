@@ -762,44 +762,55 @@ BDS300 在本项目里是**机械爪开合舵机**：舵机轴带动 20 齿齿�
 ### 8.14 Z 轴齿轮齿条标定（2026-10-27 完成）
 
 结果：机械行程 **最上面 1200 us、最下面 2500 us**（脉宽小 = 上，行程 1300 us），
-齿轮齿条全程啮合正常。已切回正常模式（`ZSERVO_CALIB_MODE = 0`）。
+齿轮齿条全程啮合正常。当前保持**台架手动模式**（`ZSERVO_CALIB_MODE = 1`）：
+上电停中间、KEY2/KEY3 一键到两端；视觉联调通过后再改 0 跑自动流程。
 
 #### 8.14.1 相关参数
 
 `Drivers/servo_z.h`：
 
 ```c
-#define ZSERVO_CALIB_MODE       0   /* 0 = 正式（当前）；改 1 进入标定 */
-#define ZSERVO_PULSE_TOP_US     1200U /* 实测：最上面（KEY3 逐档确认） */
-#define ZSERVO_PULSE_BOTTOM_US  2500U /* 实测：最下面（KEY2 逐档确认） */
-#define ZSERVO_STEP_US          50U /* 标定模式每步 */
+#define ZSERVO_CALIB_MODE       1   /* 1 = 台架手动（当前）；0 = 正式/自动流程 */
+#define ZSERVO_PULSE_TOP_US     1200U /* 实测：最上面 */
+#define ZSERVO_PULSE_BOTTOM_US  2500U /* 实测：最下面 */
+#define ZSERVO_STEP_US          50U /* 逐档模式每步 */
 #define ZSERVO_CALIB_MIN_US    1200U /* 标定窗口 = 实测行程 */
 #define ZSERVO_CALIB_MAX_US    2500U
-#define ZSERVO_CALIB_START_US  1850U /* 标定上电位置（行程中点） */
-#define ZSERVO_BENCH_KEY2_JUMP  0   /* 标定模式下 KEY2 逐档 +50 us */
-#define ZSERVO_BENCH_KEY3_JUMP  0   /* 标定模式下 KEY3 逐档 -50 us */
+#define ZSERVO_CALIB_START_US  1850U /* 台架模式上电位置（行程中点） */
+#define ZSERVO_BENCH_KEY2_JUMP  1   /* KEY2 一键到最下 2500 */
+#define ZSERVO_BENCH_KEY3_JUMP  1   /* KEY3 一键到最上 1200 */
 ```
 
-正式模式（`ZSERVO_CALIB_MODE=0`，当前）：
+`App/sorting_config.h`：
 
-1. `ZServo_Init()` 输出 **TRAVEL = 1220 us**（距上端点 20 us）并启动 TIM2_CH2；
+```c
+#define SORT_BENCH_KEY_Z_SERVO  1 /* KEY2/KEY3 控 Z（当前）*/
+#define SORT_BENCH_KEY_X_JOG    0 /* X 调试时才置 1 */
+```
+
+台架手动模式（`ZSERVO_CALIB_MODE=1`，当前）：
+
+1. `ZServo_Init()` 输出 **1850 us（行程中点）**并启动 TIM2_CH2；
 2. 限幅 **1200～2500 us**；
-3. `Travel()/Approach()/Grasp()` 正常写脉宽（1220 / 1850 / 2480）；
-4. KEY2/KEY3 恢复 X 轴点动（见 8.13.4）。
+3. `Travel()/Approach()/Grasp()` 不改脉宽（视觉未就绪，不跑全流程）；
+4. KEY2 一键到 **2500 us（最下）**、KEY3 一键到 **1200 us（最上）**，
+   每次 USART3 打印 `Z_PULSE=`；
+5. 把 `ZSERVO_BENCH_KEY2/3_JUMP` 改 0 可退回逐档 ±50 us（按住连发）。
 
-标定模式（把 `ZSERVO_CALIB_MODE` 改 1，仅重新标定时用）：
+正式/自动流程模式（`ZSERVO_CALIB_MODE=0`）：
 
-1. 上电停在 1850 us（行程中点），不先走运输位；
-2. `Travel/Approach/Grasp` 不改脉宽，状态机抢不走 Z；
-3. KEY2 每次 +50 us、KEY3 每次 -50 us，按住每 150 ms 连发，
-   每次从 USART3 打印 `Z_PULSE=`；
-4. 需要一键到位时把 `ZSERVO_BENCH_KEY2/3_JUMP` 改 1（分别到 2500/1200）；
-5. 标定完必须改回 0。
+1. 上电输出 **TRAVEL = 1220 us**（距上端点 20 us）；
+2. `Travel()/Approach()/Grasp()` 正常写脉宽（1220 / 1850 / 2480）。
+
+X 轴调试：`SORT_BENCH_KEY_Z_SERVO=0` + `SORT_BENCH_KEY_X_JOG=1`，
+KEY2/KEY3 恢复 X 点动（见 8.13.4）。
 
 #### 8.14.2 重新标定的步骤
 
 1. 先断电，把 Z 轴机构装好、齿条与齿轮确认已经咬合（手动能顺畅上下）；
-2. `ZSERVO_CALIB_MODE` 改 **1**，只给 MCU + 舵机供电，上电后 Z 停在 1850 us；
+2. 确认 `ZSERVO_CALIB_MODE=1`、`SORT_BENCH_KEY_Z_SERVO=1`、
+   `ZSERVO_BENCH_KEY2/3_JUMP=0`（逐档），只给 MCU + 舵机供电，
+   上电后 Z 停在 1850 us；
 3. **KEY3** 一档一档往上（-50 us/档），到机构顶住或串口停住即为上端点；
    **KEY2** 一档一档往下（+50 us/档），同理找下端点；
    > 如果按键“停住不走”，先看串口值是不是等于 `ZSERVO_PULSE_MIN/MAX_US`
@@ -812,7 +823,8 @@ BDS300 在本项目里是**机械爪开合舵机**：舵机轴带动 20 齿齿�
    - **TRAVEL** = 1220：最高、XY 平移时不会碰物块（距上端点 20 us）；
    - **APPROACH** = 1850：物块上方，夹爪能在张开状态下降；
    - **GRASP** = 2480：夹爪刚好能抱住物块底部（距下端点 20 us）；
-8. 把 `ZSERVO_CALIB_MODE` 改回 **0**，重新编译。
+8. 标定完把 `ZSERVO_BENCH_KEY2/3_JUMP` 改回 **1**（一键到位）；
+   视觉联调通过后把 `ZSERVO_CALIB_MODE` 改 **0** 跑自动流程。
 
 #### 8.14.3 回归检查
 

@@ -11,8 +11,21 @@
 
 /* ---------------- 调试开关 ---------------- */
 
-/* 台架按键（KEY0/KEY1 夹爪，KEY2/KEY3 X 轴点动或 Z 轴脉宽点动）
- * 只在安全且无任务时生效。正式比赛必须改为 0，彻底关闭手动入口。 */
+/* 台架 Z 轴按键（KEY2/KEY3）：1 = 控 Z（当前）；0 = 不控 Z，可改用 X 点动。
+ * 与 servo_z.h 的 ZSERVO_BENCH_KEY2/3_JUMP 配合：
+ *   ZSERVO_BENCH_KEY2/3_JUMP = 1 → KEY2 一键到最下 2500 us、KEY3 一键到最上 1200 us；
+ *   = 0 → 每次 ±ZSERVO_STEP_US（50 us），按住连发。
+ * X 调试时把本项置 0、SORT_BENCH_KEY_X_JOG 置 1。
+ * 正式比赛 SORT_ENABLE_BENCH_KEYS=0 时整段不编译。 */
+#define SORT_BENCH_KEY_Z_SERVO          1
+
+/* 台架 X 轴点动（KEY2/KEY3）：1 = 点动 X；0 = 不点动（当前）。
+ * 只在 SORT_BENCH_KEY_Z_SERVO = 0 时生效（Z 按键优先级更高）。
+ * 调 X 轴时临时把 Z_SERVO 置 0、本项置 1，调完改回。 */
+#define SORT_BENCH_KEY_X_JOG            0
+
+/* 台架按键（KEY0/KEY1 夹爪，KEY2/KEY3 Z 轴或 X 轴）只在安全且无任务时生效。
+ * 正式比赛必须改为 0，彻底关闭手动入口。 */
 #define SORT_ENABLE_BENCH_KEYS          1
 
 /* 台架按键动作方式（KEY0 = 张开方向/脉宽增大，KEY1 = 闭合方向/脉宽减小）：
@@ -40,11 +53,9 @@
  * 50 us/步 × 7 步 ≈ 1 s 走完 350 us 行程；嫌太快就加大到 200~250 ms。
  * 投放口标定（SORT_XY_CALIB_MODE=1，当前）下 KEY0 不连发：按下即开爪，
  * 长按满 SORT_DROP_KEY_LONG_PRESS_MS 才存投放口 X，连发会重置长按计时。
- * Z 轴步进标定（servo_z.h 同时满足 ZSERVO_CALIB_MODE=1、
- * ZSERVO_BENCH_KEY_JUMP=0）沿用同一节拍：KEY2/KEY3 每 REPEAT_MS 走一步
- * ZSERVO_STEP_US（50 us），整段行程也能按住扫过去。
- * Z 轴一次到位模式（ZSERVO_BENCH_KEY_JUMP=1，当前）和其余情况下的
- * KEY2/KEY3 都只在按下沿走一次。 */
+ * Z 轴逐档（SORT_BENCH_KEY_Z_SERVO=1 且 ZSERVO_BENCH_KEY2/3_JUMP=0）
+ * 沿用同一节拍：KEY2/KEY3 每 REPEAT_MS 走一步 ZSERVO_STEP_US（50 us）。
+ * Z 轴一键到位（ZSERVO_BENCH_KEY2/3_JUMP=1，当前）只在按下沿走一次。 */
 #define SORT_BENCH_KEY_REPEAT_MS        150
 
 /* 允许按键的条件（实现见 main.c 的 BenchKey_Allowed()）：
@@ -278,8 +289,8 @@
  *     KEY2/KEY3 每次只走 SORT_CALIB_JOG_STEPS（慢速点动）。
  * 0 = 恢复 KEY0/KEY1 控制夹爪（按下即到开/合位）、KEY2/KEY3 整圈点动。
  * 标定值只存在 RAM，掉电丢失；长期值要写回 SORT_DROP_X_STEP/Y_STEP。
- * ！！Z 轴齿条标定（servo_z.h 的 ZSERVO_CALIB_MODE = 1，当前）期间
- *    KEY2/KEY3 被 Z 轴脉宽占用，KEY2/KEY3 的 X 慢速点动不生效；
+ * ！！SORT_BENCH_KEY_Z_SERVO = 1（当前）时 KEY2/KEY3 被 Z 轴占用，
+ *    这里的 X 慢速点动不生效；调 X 时把 Z_SERVO 置 0、X_JOG 置 1。
  *    KEY0 的“短按开爪 + 长按存投放口”仍然有效。 */
 #define SORT_XY_CALIB_MODE              1
 #define SORT_CALIB_JOG_STEPS            100
@@ -291,21 +302,18 @@
  * 觉得太慢可改 800，但不要小于 500（会被手抖/连按误触发）。 */
 #define SORT_DROP_KEY_LONG_PRESS_MS     1000U
 
-/* ---------------- Z 轴齿条啮合标定（2026-10-27） ---------------- */
+/* ---------------- Z 轴台架模式（2026-10-27 标定完成） ---------------- */
 
-/* 开关在 Drivers/servo_z.h 的 ZSERVO_CALIB_MODE（当前 = 1）：
- *   - 上电停在 1850 us（行程中点），限幅 1500~2200 us（示波器实测行程）；
- *   - Travel/Approach/Grasp 不改脉宽，自动流程抢不走 Z；
- *   - KEY2/KEY3 由 ZSERVO_BENCH_KEY_JUMP 决定动作方式：
- *       1（当前）= 一键到位：KEY2 到最下面 2200 us、KEY3 到最上面 1500 us
- *                   （2026-10-27 示波器实测端点），按下沿触发、不连发；
- *       0 = 每次 ±ZSERVO_STEP_US（50 us），按住每
- *           SORT_BENCH_KEY_REPEAT_MS（150 ms）连发，用于重新确认端点；
- *   - 两种方式每次动作都从 USART3 打印 Z_PULSE=。
- * ！！端点 1500/2200 是机械临界，长期停住会顶死堵转；自动流程用
- *    ZSERVO_PULSE_TRAVEL/GRASP（1520/2180，各留 20 us）。
- * ！！标定完必须把 ZSERVO_CALIB_MODE 改回 0，否则自动流程不会动 Z 轴，
- *    KEY2/KEY3 也回不到 X 轴点动。 */
+/* 驱动开关在 Drivers/servo_z.h：
+ *   - ZSERVO_CALIB_MODE = 1（当前）：台架手动——上电停在 1850 us（行程中点），
+ *     Travel/Approach/Grasp 不改脉宽（视觉未就绪，不跑全流程）；
+ *     = 0：正式——上电到运输位 1220 us，自动流程正常控制 Z。
+ *   - ZSERVO_BENCH_KEY2/3_JUMP = 1（当前）：KEY2 一键到最下 2500 us、
+ *     KEY3 一键到最上 1200 us（实测端点），按下沿一次、不连发；
+ *     = 0：每次 ±ZSERVO_STEP_US（50 us），按住连发。
+ *   - 实测行程 1200~2500 us，限幅同值；工作高度占位 1220/1850/2480。
+ * ！！端点 1200/2500 是机械临界，别长时间停住；自动流程用 1220/2480。
+ * ！！视觉联调通过、跑自动流程时把 ZSERVO_CALIB_MODE 改 0。 */
 
 /* 1 = 用 USART3（PB10/PB11，115200）打印回零结果、失败码和标定步数；
  * 正式比赛可以改 0，彻底去掉调试串口输出和对应代码。 */

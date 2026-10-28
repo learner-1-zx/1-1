@@ -74,11 +74,11 @@ gcc -std=c99 -Wall -Wextra -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast `
   那不是主机仿真要验证的行为；正式模式是上电不上力、缓动到 1420/1730、限幅 1400~1750。
   改完标定值（8.12）后也用这条命令回归。
 
-- `-DZSERVO_CALIB_MODE=0`：`servo_z.h` 里该宏现在默认就是 **0**（正常模式），
-  这里显式写一遍，防止有人临时改 1 做标定后忘记改回。标定模式（=1）下
-  上电停在 1850 us（行程中点）、限幅 1200~2500，且
-  `Travel()/Approach()/Grasp()` 不改脉宽，test 7 会按正式模式断言而失败。
-  正常模式：上电到运输位 1220 us、限幅 1200~2500、工作高度 1220/1850/2480。
+- `-DZSERVO_CALIB_MODE=0`：`servo_z.h` 里该宏当前默认是 **1**（台架手动：
+  上电停 1850、`Travel/Approach/Grasp` 不改脉宽），这里显式按 0 编译，
+  让 test 7 验证正式模式的“上电到运输位 + 正限幅”行为。
+  正式模式：上电到运输位 1220 us、限幅 1200~2500、工作高度 1220/1850/2480。
+  跑自动流程前记得把 `servo_z.h` 的 `ZSERVO_CALIB_MODE` 改 0。
 
 - 主机是 64 位环境，CMSIS 头文件里少量指针/整数互转会产生告警，
   所以加 `-Wno-int-to-pointer-cast -Wno-pointer-to-int-cast`；

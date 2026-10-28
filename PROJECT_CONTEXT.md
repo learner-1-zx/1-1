@@ -56,8 +56,9 @@
 - 板载测试按键：PD0/KEY0、PD1/KEY1、PD2/KEY2、PD3/KEY3；
   当前固件在“安全且无任务”时允许 KEY0/KEY1 按下一次跳到张开/闭合位
   （投放口标定模式下 KEY0 还支持“按住 1 s 存当前 X 为投放口”）；
-  KEY2/KEY3 已恢复正常功能（`ZSERVO_CALIB_MODE=0`）：安全且无任务、X 空闲时
-  点动 X 轴（正/反，一次一个电机整圈；`SORT_XY_CALIB_MODE=1` 时 100 微步慢速）；
+  KEY2/KEY3 当前用于 **Z 轴一键到位**（`SORT_BENCH_KEY_Z_SERVO=1`）：
+  KEY2 → 最下面 2500 us、KEY3 → 最上面 1200 us，按下沿一次；
+  调 X 时把 `SORT_BENCH_KEY_Z_SERVO` 置 0、`SORT_BENCH_KEY_X_JOG` 置 1；
   改回 0 后恢复“安全且无任务、X 空闲时点动 X 轴（正/反，一次一个电机整圈）”；
   PA0/WK_UP（按下高电平）空闲
 
@@ -88,14 +89,15 @@ KEY0/KEY1 一次到位到 1730/1420 us。
 800~2200 us，KEY0/KEY1 每次 ±50 us 点动（步骤见 SORTING_FLOW.md 8.12）；
 标定完必须把 `SERVO_GRIPPER_CALIB_MODE` 改回 0，否则自动流程不会动夹爪。
 **2026-10-27 Z 轴齿条标定完成**：实测机械行程 **最上面 1200 us、
-最下面 2500 us**（脉宽小 = 上，行程 1300 us）。已切回正常模式
-（`ZSERVO_CALIB_MODE=0`）：上电到运输位 1220 us，限幅 1200~2500 us，
-`Travel()/Approach()/Grasp()` 正常控制，工作高度占位 1220/1850/2480 us
-（两端各留 20 us，GRASP/APPROACH 仍需按物块微调）。
-KEY2/KEY3 恢复 X 轴点动。重新标定时把 `ZSERVO_CALIB_MODE` 改 1：
-上电停在 1850 us（中点），`Travel/Approach/Grasp` 不改脉宽，
-KEY2/KEY3 逐档 +50/-50 us、按住连发并打印 `Z_PULSE=`；
-标定完必须改回 0（步骤见 SORTING_FLOW.md 8.14）。
+最下面 2500 us**（行程 1300 us），限幅 1200~2500 us。
+当前 `ZSERVO_CALIB_MODE=1`（台架手动）：上电停在 1850 us（行程中点），
+`Travel()/Approach()/Grasp()` 不改脉宽（视觉未就绪、不跑全流程）；
+KEY2/KEY3 控 Z：KEY2 一键到 2500、KEY3 一键到 1200（`SORT_BENCH_KEY_Z_SERVO=1`、
+`ZSERVO_BENCH_KEY2/3_JUMP=1`），每次打印 `Z_PULSE=`。
+正式工作高度占位 1220/1850/2480 us（两端各留 20 us，GRASP/APPROACH 仍需按物块微调）。
+视觉联调通过、要跑自动流程时把 `ZSERVO_CALIB_MODE` 改 0：
+上电到运输位 1220 us，`Travel/Approach/Grasp` 正常控制。
+调 X 轴时把 `SORT_BENCH_KEY_Z_SERVO` 置 0、`SORT_BENCH_KEY_X_JOG` 置 1。
 T 轴/X 轴台架测试和夹爪上电自检已删除。
 
 自动分拣状态机已按 UM2 式 Cartesian 结构实现：
@@ -111,10 +113,10 @@ XY 取料 -> Z 接近 -> 开爪 -> Z 下降 -> 闭爪 -> Z 抬升并并行转 T
   50 Hz、1 us 分辨率，比较值即脉宽微秒数；2026-10-27 实测机械行程
   **最上面 1200 us、最下面 2500 us**（行程 1300 us），限幅 1200～2500 us；
   工作高度占位 运输/接近/抓取 = 1220/1850/2480 us；
-  `ZSERVO_CALIB_MODE=0`（当前正常模式）上电到运输位 1220 us，
-  `Travel()/Approach()/Grasp()` 正常控制；重新标定把该宏改 1，
-  上电 1850 us、KEY2/KEY3 逐档 ±50 us（`ZServo_StepPulse()`），
-  `ZSERVO_BENCH_KEY2/3_JUMP=1` 时一键到 2500/1200（`ZServo_JumpTo()`）。
+  `ZSERVO_CALIB_MODE=1`（当前台架手动）上电 1850 us，
+  `Travel()/Approach()/Grasp()` 不改脉宽；KEY2/KEY3 一键到 2500/1200
+  （`SORT_BENCH_KEY_Z_SERVO=1`、`ZSERVO_BENCH_KEY2/3_JUMP=1`）。
+  改成 0 则上电到运输位 1220 us、自动流程控制 Z。
   PA1 的板载 LED 已拆除，换板时必须重新确认）
   PA1 的板载 LED 已拆除，换板时必须重新确认）
   PA1 的板载 LED 已拆除，换板时必须重新确认）

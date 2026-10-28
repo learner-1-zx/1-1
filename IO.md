@@ -71,7 +71,7 @@ TB6600（T 轴）已经按 `A+/A-/B+/B-` 标好相，按名字接即可。
 
 | 引脚 | 宏/网络名 | 模式 | 输出参数 | 功能 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| PA1 | `Z_SERVO_PWM` | AF 推挽 / `GPIO_AF1_TIM2` | 50 Hz，限幅 **1200～2500 us**（2026-10-27 实测行程：1200 最上、2500 最下）；工作高度 运输/接近/抓取 = 1220/1850/2480 us（待按物块标定）。`ZSERVO_CALIB_MODE=0`（当前正常模式）上电到运输位 1220 us；标定模式（=1）上电 1850 us、KEY2/KEY3 逐档 ±50 us | Z 轴舵机 | TIM2_CH2 硬件 PWM |
+| PA1 | `Z_SERVO_PWM` | AF 推挽 / `GPIO_AF1_TIM2` | 50 Hz，限幅 **1200～2500 us**（实测：1200 最上、2500 最下）；工作高度 1220/1850/2480 us（待按物块标定）。`ZSERVO_CALIB_MODE=1`（当前台架手动）：上电 1850 us、KEY2 一键到 2500、KEY3 一键到 1200；改成 0 则上电到运输位 1220、由自动流程控制 | Z 轴舵机 | TIM2_CH2 硬件 PWM |
 | PA8 | `SERVO_PWM` | AF1 推挽输出 | 50 Hz，闭 1420 us / 开 1730 us，限幅 1400～1750 us；上电先以 1500 us 安全中位启动 PWM，再按 50 us/20 ms 缓动 | 夹爪舵机 | TIM1_CH1 硬件 PWM |
 
 PA8 硬件 PWM 的实现方式：
@@ -98,14 +98,16 @@ PA8 硬件 PWM 的实现方式：
    有效 PWM 但顶在机构到不了的位置（不是信号断了）。先按 KEY1 往闭合方向
    退回，再按 `SORTING_FLOW.md` 8.3 重新标定；软启动（1500 us 安全中位起力 +
    50 us/20 ms 缓动）与排查步骤见 `SORTING_FLOW.md` 8.10。
-8. **Z 轴齿条标定（2026-10-27 完成）**：示波器/逐档实测机械行程
-   **最上面 1200 us、最下面 2500 us**（脉宽小 = 上，行程 1300 us）。
-   已切回正常模式（`ZSERVO_CALIB_MODE = 0`）：上电到运输位 1220 us，
-   限幅 1200～2500 us，`Travel()/Approach()/Grasp()` 正常控制，
-   KEY2/KEY3 恢复 X 轴点动。
-   需要重新标定时把 `ZSERVO_CALIB_MODE` 改 1：上电停在 1850 us（中点），
-   `Travel/Approach/Grasp` 不改脉宽，KEY2/KEY3 逐档 +50/-50 us、按住连发，
-   每次打印 `Z_PULSE=`；标定完必须改回 0。步骤见 `SORTING_FLOW.md` 8.14。
+8. **Z 轴台架模式（2026-10-27 标定完成）**：实测行程 **最上面 1200 us、
+   最下面 2500 us**（行程 1300 us），限幅同值。
+   当前 `ZSERVO_CALIB_MODE = 1`（台架手动）：上电停在 1850 us（行程中点），
+   `Travel/Approach/Grasp` 不改脉宽（视觉未就绪、不跑全流程），
+   **KEY2 一键到最下 2500 us、KEY3 一键到最上 1200 us**，每次打印 `Z_PULSE=`。
+   `SORT_BENCH_KEY_Z_SERVO=1` 决定 KEY2/KEY3 控 Z；调 X 轴时把它置 0、
+   `SORT_BENCH_KEY_X_JOG` 置 1。
+   视觉联调通过、要跑自动流程时把 `ZSERVO_CALIB_MODE` 改 0：
+   上电到运输位 1220 us，`Travel/Approach/Grasp` 正常控制。
+   步骤见 `SORTING_FLOW.md` 8.14。
 8. PA8 待机态不是浮空：`MX_TIM1_Init()` 之后 TIM1 的 `MOE=0`、`OSSI=0`，
    引脚是高阻（Hi-Z），要到第一次 `HAL_TIM_PWM_Start()` 才有输出。
    `ServoGripper_Init()` 现在把 PA8 配成推挽输出低电平（内部下拉），
@@ -218,8 +220,8 @@ PD12 配置为内部上拉输入，因此：
 | --- | --- | --- | --- |
 | PD0 | KEY0 | 低电平 | 默认：跳到张开位（1730 us）；夹爪标定模式：每次 **+50 us**；**投放口标定（`SORT_XY_CALIB_MODE=1`，当前）：按下即开爪，按住满 1 s 才把当前 X 存成投放口** |
 | PD1 | KEY1 | 低电平 | 默认：跳到闭合位（1420 us）；夹爪标定：每次 **-50 us**；Y 启用且投放口标定时：存当前 Y |
-| PD2 | KEY2 | 低电平 | 默认（`ZSERVO_CALIB_MODE=0`，当前）：安全且无任务、X 空闲时 X 正向点动（`SORT_XY_CALIB_MODE=1` 时 100 微步慢速，否则整圈 3200 微步）。标定模式（=1）时改为 Z 轴逐档 +50 us |
-| PD3 | KEY3 | 低电平 | 默认：X 负向点动；标定模式（`ZSERVO_CALIB_MODE=1`）时改为 Z 轴逐档 -50 us |
+| PD2 | KEY2 | 低电平 | `SORT_BENCH_KEY_Z_SERVO=1`（当前）：Z 轴 **一键到最下 2500 us**，每次打印 `Z_PULSE=`；Z 按键关闭且 `SORT_BENCH_KEY_X_JOG=1` 时改为 X 正向点动 |
+| PD3 | KEY3 | 低电平 | 同上：Z 轴 **一键到最上 1200 us**；X 调试模式下为 X 负向点动 |
 
 > 这四颗是板上按键，不需要外接线；KEY0～KEY3 已配置为上拉输入并带 20 ms 软件消抖。
 > **2026-10-25 起恢复正式模式**：`SERVO_GRIPPER_CALIB_MODE = 0`
@@ -236,13 +238,13 @@ PD12 配置为内部上拉输入，因此：
 > 回零后位置是相对零点的绝对步数，软限位会拦住越界点动；
 > `SORT_XY_CALIB_MODE = 1`（当前）时每次 `SORT_CALIB_JOG_STEPS`（100 微步）、
 > 速度 300 步/秒，=0 时恢复整圈 3200 微步。方向反了就调换 KEY2/KEY3 符号。
-> **2026-10-27 Z 轴齿条标定已完成**：实测 **最上面 1200 us、最下面 2500 us**
-> （行程 1300 us），已切回正常模式（`ZSERVO_CALIB_MODE = 0`）：
-> 上电到运输位 1220 us，限幅 1200～2500 us，`Travel/Approach/Grasp` 正常控制，
-> KEY2/KEY3 恢复 X 轴点动。
-> 需要重新标定时把 `ZSERVO_CALIB_MODE` 改 1：上电停在 1850 us（中点），
-> KEY2/KEY3 逐档 +50/-50 us、按住连发并打印 `Z_PULSE=`；
-> 标定完必须改回 0。步骤见 `SORTING_FLOW.md` 8.14。
+> **Z 轴台架按键（当前）**：`SORT_BENCH_KEY_Z_SERVO = 1`、`ZSERVO_CALIB_MODE = 1`
+> 时，**KEY2 一键到最下 2500 us、KEY3 一键到最上 1200 us**（按下沿一次、不连发），
+> 每次从 USART3 打印 `Z_PULSE=`；上电 Z 停在 1850 us（行程中点），
+> `Travel/Approach/Grasp` 不改脉宽（视觉未就绪时不跑全流程）。
+> 视觉联调通过、要跑自动流程时把 `ZSERVO_CALIB_MODE` 改 0（上电到运输位 1220）。
+> 调 X 轴时：`SORT_BENCH_KEY_Z_SERVO = 0` + `SORT_BENCH_KEY_X_JOG = 1`，
+> KEY2/KEY3 恢复 X 点动（见 8.13.4）。
 > **投放口标定**：用 KEY2/KEY3 把 X 移到投放口正上方后，**按住 KEY0 满
 > `SORT_DROP_KEY_LONG_PRESS_MS`（1000 ms）**，USART3（PB10，115200 8N1）
 > 会打印 `DROP_X=<步数>`；把数值写回 `SORT_DROP_X_STEP` 即可掉电保持。
@@ -444,7 +446,7 @@ while (1)
 | 2026-10-26 | 投放口改由 STM32 标定：`SORT_XY_CALIB_MODE=1` 时 KEY2/KEY3 慢速 100 微步点动、KEY0 存当前 X（`SortingTask_SaveDropX()`），USART3（PB10，115200）打印 `DROP_X=`；新增 `Service/debug_uart.c`，`SORT_DEBUG_UART` 控制输出 |
 | 2026-10-27 | 新增 **Z 轴齿条啮合标定**：`servo_z.h` 的 `ZSERVO_CALIB_MODE=1`，上电停 1500 us、`Travel()/Approach()/Grasp()` 不改脉宽；KEY2/KEY3 做成逐档 ±50 us（按住连发）扫机械端点，X 轴点动暂停 |
 | 2026-10-27 | **Z 轴下端点用示波器实测 2200 us**。据此把 `ZSERVO_PULSE_BOTTOM_US` 定为 2200、标定上电位置改 1850（中点，避免上电顶在端点堵转） |
-| 2026-10-27 | **Z 轴齿条标定完成**：KEY3 逐档确认上端点 **1200 us**，KEY2 逐档确认下端点 **2500 us**（行程 1300 us）；`ZSERVO_PULSE_TOP/BOTTOM_US`=1200/2500、限幅 1200～2500、工作高度占位 1220/1850/2480；**切回正常模式 `ZSERVO_CALIB_MODE=0`**（上电到运输位 1220 us，KEY2/KEY3 恢复 X 轴点动） |
+| 2026-10-27 | **Z 轴手动/自动模式分开**：新增 `SORT_BENCH_KEY_Z_SERVO=1`（KEY2/KEY3 控 Z，一键到 2500/1200）与 `SORT_BENCH_KEY_X_JOG=0`（X 调试时才开），X 点动不再依赖 Z 模式；`ZSERVO_CALIB_MODE=1`（当前台架手动）：上电 1850、`Travel/Approach/Grasp` 不改脉宽，视觉联调通过后改 0（上电到运输位 1220、自动流程控制 Z） |
 | 2026-10-27 | KEY0 在投放口标定模式下恢复控制夹爪：**按下即开爪，按住满 `SORT_DROP_KEY_LONG_PRESS_MS`（1000 ms）才保存投放口 X**（每次按住只存一次）；KEY0 不再参与连发，避免长按被连发重置计时；`App/sorting_config.h` 新增该长按宏，`Core/Src/main.c` 新增 `BenchGripper_OpenAction()` 与 KEY0 长按状态机 |
 | 待完成 | 确认 42-40 电机铭牌额定电流（决定 TB6600S 电流档）；BDS300 PWM 频率确认；X/Y 实测行程与投放口标定；Z_HOME 输入确认 |
 
@@ -469,10 +471,10 @@ while (1)
    `SORT_XY_CALIB_MODE=1`（当前）时 KEY0 按下即张开夹爪，**按住满
    `SORT_DROP_KEY_LONG_PRESS_MS`（1000 ms）才把当前 X 存成投放口**并从
    USART3 打印 `DROP_X=`（短按不保存，一次按住只保存一次）。
-   `ZSERVO_CALIB_MODE=0`（当前正常模式）时 KEY2/KEY3 恢复 X 轴点动；
-   重新标定把 `ZSERVO_CALIB_MODE` 改 1：KEY2/KEY3 变 Z 轴逐档 ±50 us
-   （按住连发，端点 2500/1200 已实测，`ZSERVO_BENCH_KEY2/3_JUMP=1` 可一键到端点），
-   X 轴点动暂停，标定完必须改回 0。
+   `SORT_BENCH_KEY_Z_SERVO=1`（当前）时 KEY2/KEY3 控 Z：一键到最下/最上
+   （2500/1200 us，`ZSERVO_BENCH_KEY2/3_JUMP=1`）；调 X 时把 Z_SERVO 置 0、
+   `SORT_BENCH_KEY_X_JOG` 置 1。`ZSERVO_CALIB_MODE=1`（当前）上电 1850、
+   自动流程不动 Z；跑流程前改 0。
    夹爪按键只要安全输入正常且没有任务执行（含上电回零期间）就生效，20 ms 消抖、按下沿触发；
    跳位目标由 `SORT_BENCH_KEY_AT_LIMIT` 选择（默认 1730/1420 us，
    置 1 为机械临界 1750/1400 us），正式比赛把 `SORT_ENABLE_BENCH_KEYS` 置 0。

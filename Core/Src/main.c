@@ -36,10 +36,11 @@
 
 /* 是否有台架按键需要“按住连发”：
  *   - 夹爪标定（SORT_BENCH_KEY_JUMP=0）：KEY0/KEY1；
- *   - Z 轴逐档标定（ZSERVO_BENCH_KEY2/3_JUMP=0）：对应的 KEY2/KEY3。
+ *   - Z 轴逐档（SORT_BENCH_KEY_Z_SERVO=1 且 ZSERVO_BENCH_KEY2/3_JUMP=0）：
+ *     对应的 KEY2/KEY3。
  * 一次到位模式（JUMP=1）按下一次就跳到目标，不需要连发。 */
 #if (SORT_BENCH_KEY_JUMP == 0) || \
-    ((ZSERVO_CALIB_MODE != 0) && \
+    ((SORT_BENCH_KEY_Z_SERVO != 0) && \
      ((ZSERVO_BENCH_KEY2_JUMP == 0) || (ZSERVO_BENCH_KEY3_JUMP == 0)))
 #define BENCH_KEY_REPEAT_ENABLED        1
 #else
@@ -50,14 +51,12 @@
  * KEY0/KEY1 直接跳到张开位 1730 / 闭合位 1420 us（SORT_BENCH_KEY_JUMP = 1）；
  * 夹爪标定（JUMP = 0 且 SERVO_GRIPPER_CALIB_MODE = 1）时改为每次 ±50 us，
  * 按住可连发。
- * KEY2/KEY3：ZSERVO_CALIB_MODE = 1（当前）时控制 Z 轴舵机高度：
- *   当前两个键都是逐档测试（KEY2 +50 us、KEY3 -50 us，按住连发），
- *   每次从 USART3 打印 Z_PULSE=。上端点 1200、下端点 2200 已实测，
- *   需要一键到位时把 ZSERVO_BENCH_KEY2/3_JUMP 改成 1。
- *   两种情况都在 ZSERVO_CALIB_MODE = 0 后恢复 X 轴点动（正/反，整圈）。
+ * KEY2/KEY3：SORT_BENCH_KEY_Z_SERVO=1（当前）时控 Z 轴：
+ *   一键到最下/最上（ZSERVO_BENCH_KEY2/3_JUMP=1）或逐档 ±50 us（=0），
+ *   每次从 USART3 打印 Z_PULSE=。
+ *   SORT_BENCH_KEY_X_JOG=1 且 Z 按键关闭时才改回 X 轴点动（X 调试用）。
  * SORT_XY_CALIB_MODE = 1（当前）时 KEY0 改为“按下即开爪 + 长按 1 s 存投放口 X”，
- * KEY1 在 Y 未启用时仍闭合夹爪；X 轴点动改为慢速 SORT_CALIB_JOG_STEPS
- * （被 Z 轴标定模式占用时不生效）。
+ * KEY1 在 Y 未启用时仍闭合夹爪；X 轴点动改为慢速 SORT_CALIB_JOG_STEPS。
  * 正式比赛把 SORT_ENABLE_BENCH_KEYS 置 0 即可完全关闭手动入口。 */
 
 /*
@@ -263,9 +262,10 @@ static uint8_t BenchKey_Allowed(void)
  * 起步前把速度降到 SORT_CALIB_JOG_SPEED_STEPS_S，走完由
  * BenchKey_Process 开头恢复正式速度。
  *
- * ZSERVO_CALIB_MODE=1（Z 轴齿条啮合标定）时 KEY2/KEY3 归 Z 轴脉宽用，
- * 这一整段 X 轴点动代码不编译，避免“定义了却没调用”的告警。 */
-#if !ZSERVO_CALIB_MODE
+ * Z 轴按键开启（SORT_BENCH_KEY_Z_SERVO=1）时 KEY2/KEY3 归 Z 轴用，
+ * 这一整段 X 轴点动代码不编译，避免“定义了却没调用”的告警。
+ * 调 X 轴时把 SORT_BENCH_KEY_Z_SERVO 置 0、SORT_BENCH_KEY_X_JOG 置 1。 */
+#if SORT_BENCH_KEY_X_JOG
 #if SORT_XY_CALIB_MODE
 static uint8_t calib_jog_slow;
 #endif
@@ -290,7 +290,7 @@ static void BenchX_Jog(int8_t direction)
 
   (void)StepperMotor_MoveRelative(STEPPER_X, (int32_t)direction * steps);
 }
-#endif /* !ZSERVO_CALIB_MODE */
+#endif /* SORT_BENCH_KEY_X_JOG */
 
 /* 台架“张开夹爪”动作：KEY0 专用（一次到位/步进两种模式共用一份实现）。
  * SORT_BENCH_KEY_JUMP=1 时直接跳到张开位（默认 1730 us，SORT_BENCH_KEY_AT_LIMIT=1
@@ -341,7 +341,7 @@ static void BenchKey_Process(void)
   uint32_t now = HAL_GetTick();
   uint32_t i;
 
-#if SORT_XY_CALIB_MODE && !ZSERVO_CALIB_MODE
+#if SORT_XY_CALIB_MODE && SORT_BENCH_KEY_X_JOG
   /* 标定慢速点动已经走完：恢复正式速度，避免下一次自动任务也慢速。 */
   if ((calib_jog_slow != 0U) && (StepperMotor_IsBusy(STEPPER_X) == 0U))
   {
@@ -421,9 +421,9 @@ static void BenchKey_Process(void)
    * 按住不放则每 SORT_BENCH_KEY_REPEAT_MS 再走一步，省得为几步反复点击：
    *   - 夹爪标定（SORT_BENCH_KEY_JUMP=0）：KEY0/KEY1 连发；
    *     但投放口标定开启（SORT_XY_CALIB_MODE=1）时 KEY0 要留给长按计时，不连发；
-   *   - Z 轴步进标定（ZSERVO_BENCH_KEY_JUMP=0）：KEY2/KEY3 连发。
-   * Z 轴两个键当前都是逐档（ZSERVO_BENCH_KEY2/3_JUMP=0），按住连发；
-   * 改成 1 时对应的键只在按下沿一键到端点。
+   *   - Z 轴逐档（SORT_BENCH_KEY_Z_SERVO=1 且 ZSERVO_BENCH_KEY2/3_JUMP=0）：
+   *     KEY2/KEY3 连发；
+   * Z 轴两个键当前都是一键到位（ZSERVO_BENCH_KEY2/3_JUMP=1），只在按下沿走一次。
    * 其余情况下 KEY2/KEY3（X 轴点动）也只在按下沿触发一次。
    */
   for (i = 0U; i < 4U; ++i)
@@ -444,7 +444,7 @@ static void BenchKey_Process(void)
         repeatable = 1U;
       }
 #endif
-#if (ZSERVO_CALIB_MODE != 0)
+#if (SORT_BENCH_KEY_Z_SERVO != 0)
       /* 只有“逐档”那一侧的键需要连发；一键到位只在按下沿跳一次。 */
       if (((i == 2U) && (ZSERVO_BENCH_KEY2_JUMP == 0)) ||
           ((i == 3U) && (ZSERVO_BENCH_KEY3_JUMP == 0)))
@@ -511,16 +511,14 @@ static void BenchKey_Process(void)
       }
 #endif
       /* KEY2/KEY3：
-       *   ZSERVO_CALIB_MODE=1（Z 轴标定）：
-       *     KEY2 由 ZSERVO_BENCH_KEY2_JUMP 决定：0（当前）= 每次 +ZSERVO_STEP_US
-       *       （按住连发）；1 = 一键到最下面 ZSERVO_PULSE_BOTTOM_US（2200 us）；
-       *     KEY3 由 ZSERVO_BENCH_KEY3_JUMP 决定：0（当前）= 每次 -ZSERVO_STEP_US
-       *       （按住连发）；1 = 一键到最上面 ZSERVO_PULSE_TOP_US（1200 us）；
+       *   SORT_BENCH_KEY_Z_SERVO=1（当前）：控 Z 轴
+       *     ZSERVO_BENCH_KEY2/3_JUMP=1（当前）：KEY2 一键到最下 2500 us、
+       *       KEY3 一键到最上 1200 us，按下沿一次、不连发；
+       *     = 0 时每次 ±ZSERVO_STEP_US（50 us），按住连发；
        *   每次动作都从 USART3 打印 Z_PULSE=。
-       *   否则恢复 X 轴点动：KEY2 正向、KEY3 反向。回零后是绝对坐标，
-       *   MoveRelative 仍按当前位置累加；软限位由 stepper_motor.c 的
-       *   MoveTo 统一检查。 */
-#if ZSERVO_CALIB_MODE
+       *   否则若 SORT_BENCH_KEY_X_JOG=1：KEY2 正向、KEY3 反向点动 X；
+       *   两者都关时 KEY2/KEY3 不动作。 */
+#if SORT_BENCH_KEY_Z_SERVO
       if (i == 2U)
       {
 #if ZSERVO_BENCH_KEY2_JUMP
@@ -543,7 +541,7 @@ static void BenchKey_Process(void)
         DebugUart_WriteInt("Z_PULSE=", (int32_t)ZServo_GetPulse());
 #endif
       }
-#else
+#elif SORT_BENCH_KEY_X_JOG
       if (i == 2U)
       {
         BenchX_Jog(+1);
