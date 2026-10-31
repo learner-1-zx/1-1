@@ -42,6 +42,18 @@ extern uint32_t     host_gpio_pa8_af;      /* PA8 最近一次 HAL_GPIO_Init 的
 extern uint8_t      host_gpio_pa8_level;   /* PA8 最近一次 HAL_GPIO_WritePin 的电平 */
 extern uint32_t     host_gpio_pa8_mode_at_pwm_start; /* 启动 TIM1_CH1 瞬间的 PA8 模式 */
 
+/* USART 桩：记录 USART3 发出的调试/控制台文本，以及 HAL_UART_Receive_IT
+ * 的挂载次数（验证 BenchConsole_Init 有没有把接收中断挂上）。 */
+#define HOST_UART_TX_MAX 4096U
+extern uint8_t      host_uart_tx[HOST_UART_TX_MAX];
+extern uint32_t     host_uart_tx_count;
+extern uint32_t     host_uart_rx_arm_calls;
+
+/* 台架运动指令（bench_motion.c）只关心“有没有自动任务在执行”。
+ * 主机仿真不链接 sorting_task.c，用这个变量模拟；
+ * 置 1 等价于 SortingTask_HasMission() == 1。 */
+extern uint8_t      host_mission_active;
+
 /* 外设句柄实体：仿真时用普通内存代替寄存器。 */
 extern TIM_TypeDef host_tim1_regs;
 extern TIM_TypeDef host_tim2_regs;
@@ -52,10 +64,14 @@ extern TIM_HandleTypeDef htim1;
 extern TIM_HandleTypeDef htim2;
 extern TIM_HandleTypeDef htim6;
 extern SPI_HandleTypeDef hspi2;
+extern UART_HandleTypeDef huart2;
+extern UART_HandleTypeDef huart3;
 
 /* 清空所有记录。 */
 void host_reset(void);
 /* 返回第 index 次传输中第 offset 个字节，越界返回 0。 */
 uint8_t host_xfer_byte(uint32_t index, uint16_t offset);
+/* USART3 已发送文本（NUL 结尾），用于断言控制台/调试输出。 */
+const char *host_uart_text(void);
 
 #endif

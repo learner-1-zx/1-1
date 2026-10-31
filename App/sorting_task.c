@@ -42,6 +42,13 @@ static int8_t homing_dir;
 /* 本段回零的起始位置，用于“走太远还没触发”的保护。 */
 static int32_t homing_start_step;
 
+#if SORT_DEBUG_UART
+/* 回零时打印零点引脚原始电平：1 = 高（未压到），0 = 低（压到）。
+ * 现场排查用：手动按压开关看串口是否跟着变化，能立刻区分
+ * “线没接/接错脚”和“机械上压不到开关”。 */
+static uint8_t home_raw_last;
+#endif
+
 /* 投放口坐标：由 STM32 自己保存（上位机只发取料坐标）。
  * 初值取 sorting_config.h 的宏，回零后可用台架按键把当前位置写进来。 */
 static int32_t drop_x_step;
@@ -196,6 +203,9 @@ static uint8_t SortingTask_StartAxisHoming(StepperAxis_t axis,
   homing_home = home;
   homing_dir = direction;
   homing_start_step = StepperMotor_GetPosition(axis);
+#if SORT_DEBUG_UART
+  home_raw_last = (AxisHome_ReadRaw(home) == GPIO_PIN_RESET) ? 0U : 1U;
+#endif
 
   StepperMotor_Stop(axis);
   StepperMotor_InvalidatePosition(axis);
@@ -225,6 +235,23 @@ static uint8_t SortingTask_HomeExceededMaxSteps(void)
   }
   return (moved > limit) ? 1U : 0U;
 }
+
+#if SORT_DEBUG_UART
+/* 回零期间监视零点引脚原始电平，变化时打印。
+ * 只用于台架接线排查，SORT_DEBUG_UART=0 时整段不编译。 */
+static void SortingTask_TraceHomePin(void)
+{
+  uint8_t raw = (AxisHome_ReadRaw(homing_home) == GPIO_PIN_RESET) ? 0U : 1U;
+
+  if (raw != home_raw_last)
+  {
+    home_raw_last = raw;
+    DebugUart_WriteInt((homing_home == AXIS_HOME_X) ? "X_HOME_PIN="
+                                                    : "Y_HOME_PIN=",
+                       (int32_t)raw);
+  }
+}
+#endif
 
 /* 慢速二次触发点定义为该轴 0 点：软限位按回零方向自动取
  * “0~+行程”或“-行程~0”，并把速度恢复到正式任务的巡航速度。 */
@@ -637,6 +664,16 @@ void SortingTask_Process(void)
     return;
   }
 
+#if SORT_DEBUG_UART
+  /* X/Y 回零三段里监视零点引脚：手动按压开关时串口会打印电平变化。 */
+  if ((state == SORT_XY_HOMING_SEARCH) ||
+      (state == SORT_XY_HOMING_BACKOFF) ||
+      (state == SORT_XY_HOMING_APPROACH))
+  {
+    SortingTask_TraceHomePin();
+  }
+#endif
+
   switch (state)
   {
     case SORT_SYS_INIT:
@@ -659,6 +696,14 @@ void SortingTask_Process(void)
 #else
       /* Y 暂不启用：确保驱动器不使能，回零期间也不会被误带动。 */
       StepperMotor_Enable(STEPPER_Y, 0U);
+#endif
+#if SORT_DEBUG_UART
+      /* 回零开始先打印两个零点引脚的实际电平（1=高/未压到，0=低/压到）。
+       * 按着 X 开关上电时如果变化的是 Y_HOME_PIN，说明线插到了 PD5。 */
+      DebugUart_WriteInt("X_HOME_PIN=",
+                         (AxisHome_ReadRaw(AXIS_HOME_X) == GPIO_PIN_RESET) ? 0 : 1);
+      DebugUart_WriteInt("Y_HOME_PIN=",
+                         (AxisHome_ReadRaw(AXIS_HOME_Y) == GPIO_PIN_RESET) ? 0 : 1);
 #endif
       if (SortingTask_StartAxisHoming(STEPPER_X, AXIS_HOME_X,
                                       (int8_t)SORT_X_HOME_DIR) == 0U)

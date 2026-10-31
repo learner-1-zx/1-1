@@ -7,7 +7,11 @@
 #include "servo_gripper.h"
 #include "hall_sensor.h"
 #include "axis_home.h"
+#include "bench_console.h"
+#include "bench_motion.h"
+#include "safety_manager.h"
 #include "sorting_config.h"
+#include "stepper_motor.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -608,9 +612,282 @@ static void test_axis_home(void)
         "invalid axis id debounce returns 0");
 }
 
+/* USART3 台架控制台：电脑串口发单字符 = 虚拟按键。
+ * 仿真只验证命令解析、短按/长按的保持时间、释放和输出文本；
+ * 真机上还要确认 PB11（USART3_RX）接到 USB-TTL 的 TX、115200 8N1，
+ * 以及按键动作仍受“安全 + 无任务”门控。 */
+static void test_bench_console(void)
+{
+  uint8_t pressed;
+
+  printf("test 12: bench console (USART3) virtual keys and commands\n");
+
+  host_reset();
+  BenchConsole_Init();
+  CHECK(host_uart_rx_arm_calls == 1U,
+        "Init arms the USART3 single-byte RX interrupt once");
+  CHECK(strstr(host_uart_text(), "BENCH CONSOLE READY") != NULL,
+        "Init prints the console banner");
+
+  /* 短按 KEY2：100 ms 内保持按下，之后自动释放，其他键不受影响。 */
+  host_tick_ms = 1000U;
+  BenchConsole_FeedByte((uint8_t)'2');
+  BenchConsole_Process();
+  CHECK(strstr(host_uart_text(), "TAP K2") != NULL, "'2' echoes TAP K2");
+  CHECK(BenchConsole_GetVirtualKey(2U, &pressed) == 1U, "'2' presses KEY2");
+  CHECK(pressed == 1U, "virtual KEY2 level is pressed");
+  CHECK(BenchConsole_GetVirtualKey(0U, &pressed) == 0U,
+        "KEY0 is untouched by '2'");
+  host_tick_ms = 1099U;
+  CHECK(BenchConsole_GetVirtualKey(2U, &pressed) == 1U,
+        "KEY2 still pressed at 99 ms");
+  host_tick_ms = 1100U;
+  CHECK(BenchConsole_GetVirtualKey(2U, &pressed) == 0U,
+        "KEY2 auto-releases after 100 ms");
+
+  /* 长按 KEY0：1500 ms，覆盖“按住满 1 s 存投放口”的判据。 */
+  host_tick_ms = 2000U;
+  BenchConsole_FeedByte((uint8_t)'A');
+  BenchConsole_Process();
+  CHECK(strstr(host_uart_text(), "HOLD K0") != NULL, "'A' echoes HOLD K0");
+  host_tick_ms = 3000U;
+  CHECK((BenchConsole_GetVirtualKey(0U, &pressed) == 1U) && (pressed == 1U),
+        "KEY0 is still held after 1000 ms (drop-save window)");
+  host_tick_ms = 3500U;
+  CHECK(BenchConsole_GetVirtualKey(0U, &pressed) == 0U,
+        "KEY0 auto-releases after 1500 ms");
+
+  /* x 立即释放；越界/空指针安全返回。 */
+  host_tick_ms = 4000U;
+  BenchConsole_FeedByte((uint8_t)'B');
+  BenchConsole_Process();
+  CHECK(BenchConsole_GetVirtualKey(1U, &pressed) == 1U, "'B' presses KEY1");
+  BenchConsole_FeedByte((uint8_t)'x');
+  BenchConsole_Process();
+  CHECK(strstr(host_uart_text(), "RELEASE ALL") != NULL,
+        "'x' reports release");
+  CHECK(BenchConsole_GetVirtualKey(1U, &pressed) == 0U,
+        "'x' releases the virtual key immediately");
+  CHECK(BenchConsole_GetVirtualKey(9U, &pressed) == 0U,
+        "out-of-range key index is safe");
+  CHECK(BenchConsole_GetVirtualKey(0U, NULL) == 0U,
+        "NULL output pointer is safe");
+
+  /* 帮助、未知命令、串口助手附带的 CR/LF。 */
+  host_reset();
+  BenchConsole_FeedByte((uint8_t)'h');
+  BenchConsole_Process();
+  CHECK(strstr(host_uart_text(), "0..3") != NULL, "'h' prints the help text");
+
+  host_reset();
+  BenchConsole_FeedByte((uint8_t)'z');
+  BenchConsole_Process();
+  CHECK(strstr(host_uart_text(), "UNKNOWN CMD") != NULL,
+        "unknown command is reported");
+
+  host_reset();
+  BenchConsole_FeedByte((uint8_t)'\r');
+  BenchConsole_FeedByte((uint8_t)'\n');
+  BenchConsole_Process();
+  CHECK(host_uart_tx_count == 0U,
+        "CR/LF from a serial terminal produces no output");
+}
+
+/* USART3 台架运动指令：X/T/Z/G/R。
+ * 仿真只验证“命令解析 + 目标值 + 序列时序”，真实行程/方向仍需实机确认。 */
+static void feed_command(const char *text)
+{
+  while (*text != '\0')
+  {
+    (void)BenchMotion_HandleByte((uint8_t)*text);
+    ++text;
+  }
+  /* 回车终结命令：数字命令是在“遇到非数字”时才执行的。 */
+  (void)BenchMotion_HandleByte((uint8_t)'\n');
+}
+
+static void test_bench_motion(void)
+{
+  printf("test 13: bench motion commands (USART3 X/T/Z/G/R)\n");
+
+  host_reset();
+  StepperMotor_Init();
+  ZServo_Init();
+  ServoGripper_Init();
+  SafetyManager_Init();
+  BenchMotion_Init();
+
+  /* 与 SortingTask_ApplyMotionConfig() 相同的速度和软限位。 */
+  StepperMotor_SetSpeed(STEPPER_X, SORT_XY_MAX_SPEED_STEPS_S);
+  StepperMotor_SetAcceleration(STEPPER_X, SORT_XY_ACCEL_STEPS_S2);
+  StepperMotor_SetSoftLimit(STEPPER_X, SORT_X_MIN_STEP, SORT_X_MAX_STEP);
+  StepperMotor_SetSpeed(STEPPER_T, SORT_T_MAX_SPEED_STEPS_S);
+  StepperMotor_SetAcceleration(STEPPER_T, SORT_T_ACCEL_STEPS_S2);
+  StepperMotor_SetSoftLimit(STEPPER_T, SORT_T_MIN_STEP, SORT_T_MAX_STEP);
+  StepperMotor_SetPosition(STEPPER_X, 0);
+  StepperMotor_SetPosition(STEPPER_T, 0);
+  host_mission_active = 0U;
+
+  /* X<步数>：只设目标，不阻塞 */
+  feed_command("X1200");
+  CHECK(StepperMotor_IsBusy(STEPPER_X) == 1U, "X1200 starts an X move");
+  CHECK(StepperMotor_GetRemaining(STEPPER_X) == 1200,
+        "X1200 targets 1200 absolute steps");
+  CHECK(BenchMotion_GetLastX() == 1200, "last X is cached for R");
+
+  /* 单字符按键仍然归按键控制台，不能被运动解析吞掉 */
+  CHECK(BenchMotion_HandleByte((uint8_t)'2') == 0U,
+        "digit '2' is not consumed by the motion parser");
+
+  /* 软限位/数值范围 */
+  StepperMotor_Stop(STEPPER_X);
+  feed_command("X30000");
+  CHECK(StepperMotor_IsBusy(STEPPER_X) == 0U,
+        "X30000 is rejected by the soft limit");
+
+  /* Z：ZT/ZB/Z<us>，越界不改脉宽 */
+  feed_command("ZT");
+  CHECK(host_tim2_regs.CCR2 == 1200U, "ZT moves Z to the top (1200 us)");
+  feed_command("ZB");
+  CHECK(host_tim2_regs.CCR2 == 2500U, "ZB moves Z to the bottom (2500 us)");
+  feed_command("Z2200");
+  CHECK(host_tim2_regs.CCR2 == 2200U, "Z2200 sets an explicit pulse");
+  feed_command("Z9999");
+  CHECK(host_tim2_regs.CCR2 == 2200U, "Z9999 is rejected, pulse unchanged");
+
+  /* 夹爪：GO/GC 直接到位，G<us> 越界被拒 */
+  feed_command("GO");
+  CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_OPEN_PULSE_US,
+        "GO opens the gripper");
+  feed_command("GC");
+  CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_CLOSE_PULSE_US,
+        "GC closes the gripper");
+  feed_command("G100");
+  CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_CLOSE_PULSE_US,
+        "G100 is rejected by the pulse window");
+
+  /* 转盘：T<1..6>，按仓表单向补角 */
+  host_reset();
+  feed_command("T9");
+  CHECK(strstr(host_uart_text(), "REJECT BIN") != NULL,
+        "T9 reports an invalid bin");
+  CHECK(StepperMotor_IsBusy(STEPPER_T) == 0U, "T9 does not move the turret");
+  feed_command("T3");
+  CHECK(StepperMotor_IsBusy(STEPPER_T) == 1U, "T3 starts the turret");
+  CHECK(StepperMotor_GetRemaining(STEPPER_T) == SORT_T_BIN_STEP(2),
+        "T3 targets bin 3 (5547 steps from zero)");
+  CHECK(BenchMotion_GetLastBin() == 3U, "last bin is cached for R");
+
+  /* 快进到仓 3，让转盘空闲 */
+  StepperMotor_SetPosition(STEPPER_T, SORT_T_BIN_STEP(2));
+  BenchMotion_Process();
+
+  /* 全流程：X 与 T 同时起步 */
+  feed_command("R1200,1");
+  CHECK(BenchMotion_IsBusy() == 1U, "R1200,1 starts the sequence");
+  CHECK(StepperMotor_IsBusy(STEPPER_X) == 1U, "sequence moves X");
+  CHECK(StepperMotor_GetRemaining(STEPPER_X) == 1200,
+        "sequence X target is 1200");
+  CHECK(StepperMotor_IsBusy(STEPPER_T) == 1U,
+        "sequence starts the turret at the same time");
+
+  /* 序列运行期间，直接运动指令被拒 */
+  feed_command("X100");
+  CHECK(StepperMotor_GetRemaining(STEPPER_X) == 1200,
+        "X100 is rejected while the sequence runs");
+
+  /* 快进 X 到位 -> 开爪 -> Z 下降 -> 闭爪 -> Z 上升 -> 等转盘 */
+  StepperMotor_SetPosition(STEPPER_X, 1200);
+  BenchMotion_Process();
+  CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_OPEN_PULSE_US,
+        "sequence opens the gripper when X arrives");
+
+  host_tick_ms += BENCH_MOTION_GRIP_SETTLE_MS;
+  BenchMotion_Process();
+  CHECK(host_tim2_regs.CCR2 == 2500U, "sequence lowers Z to the bottom");
+
+  host_tick_ms += BENCH_MOTION_Z_SETTLE_MS;
+  BenchMotion_Process();
+  CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_CLOSE_PULSE_US,
+        "sequence closes the gripper at the bottom");
+
+  host_tick_ms += BENCH_MOTION_GRIP_SETTLE_MS;
+  BenchMotion_Process();
+  CHECK(host_tim2_regs.CCR2 == 1220U,
+        "sequence lifts Z to the travel height (1220 us)");
+
+  host_tick_ms += BENCH_MOTION_Z_SETTLE_MS;
+  BenchMotion_Process();
+  CHECK(BenchMotion_IsBusy() == 1U, "sequence waits for the turret");
+
+  StepperMotor_SetPosition(STEPPER_T, 0);
+  BenchMotion_Process();
+  CHECK(BenchMotion_IsBusy() == 0U, "sequence finishes when the turret is idle");
+
+  /* 自动任务抢占：序列必须停轴退出 */
+  feed_command("R1200,2");
+  CHECK(BenchMotion_IsBusy() == 1U, "R1200,2 starts another sequence");
+  host_mission_active = 1U;
+  BenchMotion_Process();
+  CHECK(BenchMotion_IsBusy() == 0U, "a mission preempts the sequence");
+  CHECK(StepperMotor_IsBusy(STEPPER_T) == 0U,
+        "preemption stops the turret pulses");
+  host_mission_active = 0U;
+
+  /* RA 中止 */
+  feed_command("R1200,3");
+  CHECK(BenchMotion_IsBusy() == 1U, "sequence restarts");
+  feed_command("RA");
+  CHECK(BenchMotion_IsBusy() == 0U, "RA aborts the sequence");
+
+  /* 中止后单轴指令恢复可用 */
+  feed_command("X500");
+  CHECK(StepperMotor_IsBusy(STEPPER_X) == 1U, "X500 works after the abort");
+  CHECK(StepperMotor_GetRemaining(STEPPER_X) == 700,
+        "X500 moves from 1200 back to 500");
+
+  /* 行解析细节：空格、单独查询、坏参数、超时丢弃 */
+  StepperMotor_SetPosition(STEPPER_X, 500);
+  host_reset();
+  feed_command("X 800");
+  CHECK(StepperMotor_GetRemaining(STEPPER_X) == 300,
+        "X 800 (with a space) moves 300 steps from 500");
+  StepperMotor_Stop(STEPPER_X);
+
+  host_reset();
+  feed_command("X");
+  CHECK(strstr(host_uart_text(), "X POS=") != NULL,
+        "bare X prints the current position");
+
+  host_reset();
+  feed_command("X12x");
+  CHECK(strstr(host_uart_text(), "BAD ARGUMENT") != NULL,
+        "trailing junk is reported");
+  CHECK(StepperMotor_IsBusy(STEPPER_X) == 0U,
+        "a bad command does not move the axis");
+
+  /* 半条命令超时丢弃后，0~3 仍然能当按键用 */
+  host_reset();
+  (void)BenchMotion_HandleByte((uint8_t)'X');
+  (void)BenchMotion_HandleByte((uint8_t)'1');
+  host_tick_ms += BENCH_MOTION_LINE_TIMEOUT_MS + 1U;
+  BenchMotion_Process();
+  CHECK(strstr(host_uart_text(), "DROPPED") != NULL,
+        "a partial command is dropped after the timeout");
+  CHECK(BenchMotion_HandleByte((uint8_t)'2') == 0U,
+        "keys work again after a dropped command");
+
+  /* R 允许空格和逗号 */
+  host_reset();
+  feed_command("R 1000 , 2");
+  CHECK(BenchMotion_IsBusy() == 1U, "R 1000 , 2 accepts spaces and comma");
+  feed_command("RA");
+  CHECK(BenchMotion_IsBusy() == 0U, "RA aborts the spaced R command");
+}
+
 int main(void)
 {
-  printf("== host simulation for lcd_st7789 / servo_z / servo_gripper / hall_sensor / axis_home ==\n");
+  printf("== host simulation for lcd_st7789 / servo_z / servo_gripper / hall_sensor / axis_home / bench_console / bench_motion ==\n");
 
   test_fill_color();
   test_draw_image();
@@ -623,6 +900,8 @@ int main(void)
   test_hall_sensor();
   test_turret_bin_math();
   test_axis_home();
+  test_bench_console();
+  test_bench_motion();
 
   printf("== checks=%d failures=%d ==\n", checks, failures);
   if (failures == 0)

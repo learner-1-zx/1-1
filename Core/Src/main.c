@@ -33,6 +33,9 @@
 #if SORT_DEBUG_UART
 #include "debug_uart.h"
 #endif
+#if SORT_DEBUG_CONSOLE
+#include "bench_console.h"
+#endif
 
 /* 是否有台架按键需要“按住连发”：
  *   - 夹爪标定（SORT_BENCH_KEY_JUMP=0）：KEY0/KEY1；
@@ -163,6 +166,10 @@ int main(void)
   SafetyManager_Init();
   SortingTask_Init();
   Protocol_Init();
+#if SORT_DEBUG_CONSOLE
+  /* USART3 台架控制台：挂上单字节接收中断，用电脑串口助手模拟按键。 */
+  BenchConsole_Init();
+#endif
   HAL_TIM_Base_Start_IT(&htim6);
   /* USER CODE END 2 */
 
@@ -173,6 +180,11 @@ int main(void)
     /* 所有函数都应保持非阻塞，步进脉冲由 TIM6 中断统一调度。 */
     SafetyManager_Process();
     ServoGripper_Process();
+#if SORT_DEBUG_CONSOLE
+    /* 台架串口控制台：先把 USART3 收到的字符变成虚拟按键/状态打印，
+     * 下面的 BenchKey_Process 会像读真实 GPIO 一样读到这些虚拟电平。 */
+    BenchConsole_Process();
+#endif
 #if SORT_ENABLE_BENCH_KEYS
     if (BenchKey_Allowed() != 0U)
     {
@@ -237,6 +249,26 @@ void SystemClock_Config(void)
 /* USER CODE BEGIN 4 */
 
 #if SORT_ENABLE_BENCH_KEYS
+/* 读取按键原始电平：默认读 GPIO（PD0~PD3 上拉，按下为低）。
+ * SORT_DEBUG_CONSOLE=1 时优先取 USART3 控制台注入的虚拟按键，
+ * 后面的消抖/门控/连发/长按逻辑对“串口按键”和“真实按键”完全一样。
+ * 虚拟按键只持续有限时间，到期自动回落到真实 GPIO，不会把键卡住。 */
+static GPIO_PinState BenchKey_ReadRaw(uint8_t index, GPIO_TypeDef *port,
+                                      uint16_t pin)
+{
+#if SORT_DEBUG_CONSOLE
+  uint8_t pressed;
+
+  if (BenchConsole_GetVirtualKey(index, &pressed) != 0U)
+  {
+    return (pressed != 0U) ? GPIO_PIN_RESET : GPIO_PIN_SET;
+  }
+#else
+  (void)index;
+#endif
+  return HAL_GPIO_ReadPin(port, pin);
+}
+
 /* 台架按键门控：
  *  - 安全输入正常，且没有正在执行的分拣任务时允许按键；
  *    上电回零期间、READY、回零失败后的 ERROR 都能立即响应，便于只接
@@ -359,7 +391,7 @@ static void BenchKey_Process(void)
   {
     for (i = 0U; i < 4U; ++i)
     {
-      stable[i] = HAL_GPIO_ReadPin(ports[i], pins[i]);
+      stable[i] = BenchKey_ReadRaw(i, ports[i], pins[i]);
       last_raw[i] = stable[i];
       changed_tick[i] = now;
 #if BENCH_KEY_REPEAT_ENABLED
@@ -380,7 +412,7 @@ static void BenchKey_Process(void)
   {
     for (i = 0U; i < 4U; ++i)
     {
-      stable[i] = HAL_GPIO_ReadPin(ports[i], pins[i]);
+      stable[i] = BenchKey_ReadRaw(i, ports[i], pins[i]);
       last_raw[i] = stable[i];
       changed_tick[i] = now;
 #if BENCH_KEY_REPEAT_ENABLED
@@ -396,7 +428,7 @@ static void BenchKey_Process(void)
 
   for (i = 0U; i < 4U; ++i)
   {
-    GPIO_PinState raw = HAL_GPIO_ReadPin(ports[i], pins[i]);
+    GPIO_PinState raw = BenchKey_ReadRaw(i, ports[i], pins[i]);
 
     if (raw != last_raw[i])
     {

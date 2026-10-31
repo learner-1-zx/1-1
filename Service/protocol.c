@@ -1,6 +1,13 @@
 #include "protocol.h"
 #include "main.h"
 #include "usart.h"
+#include "sorting_config.h"
+#if SORT_DEBUG_CONSOLE
+#include "bench_console.h"
+#endif
+#if SORT_BENCH_MOTION
+#include "bench_motion.h"
+#endif
 #include "sorting_task.h"
 #include "safety_manager.h"
 
@@ -45,6 +52,16 @@ void Protocol_Init(void)
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
   uint16_t next;
+
+#if SORT_DEBUG_CONSOLE
+  /* USART3 是台架文字控制台（虚拟按键），单独分发；
+   * 全工程只有这一个 RxCplt 回调，所以由这里统一分口。 */
+  if (huart->Instance == USART3)
+  {
+    BenchConsole_RxComplete();
+    return;
+  }
+#endif
 
   if (huart->Instance != USART2)
   {
@@ -113,6 +130,16 @@ static void Protocol_HandleFrame(uint8_t command, const uint8_t *payload,
       Protocol_SendError(mission.task_id, (uint8_t)SORT_ERR_EMERGENCY);
       return;
     }
+
+#if SORT_BENCH_MOTION
+    /* 台架运动序列（USART3 的 R 指令）正在动轴时拒收视觉任务，
+     * 避免状态机和手动序列同时驱动同一根轴。 */
+    if (BenchMotion_IsBusy() != 0U)
+    {
+      Protocol_SendEvent(PROTOCOL_EVENT_BUSY, mission.task_id);
+      return;
+    }
+#endif
 
     if (SortingTask_Submit(&mission) != 0U)
     {

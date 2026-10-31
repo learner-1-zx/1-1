@@ -319,6 +319,36 @@
  * 正式比赛可以改 0，彻底去掉调试串口输出和对应代码。 */
 #define SORT_DEBUG_UART                 1
 
+/* 1 = 打开 USART3 台架文字控制台（与 SORT_DEBUG_UART 共用 PB10/PB11）：
+ *   电脑串口助手直接发单字符就能当按键用——
+ *     0~3 = 短按 KEY0~KEY3（100 ms），
+ *     A~D = 长按 KEY0~KEY3（1500 ms，KEY0 可测“长按 1 s 存投放口”），
+ *     s   = 打印状态/位置/舵机脉宽/按键电平，
+ *     x   = 释放虚拟按键，h = 帮助。
+ *   虚拟按键和真实按键走同一条路径（消抖、安全+无任务门控、连发、长按
+ *   全部复用），任务执行期间照样不响应。
+ *   控制台的回显复用 debug_uart.c（USART3），所以 SORT_DEBUG_UART=0 也能用；
+ *   SORT_ENABLE_BENCH_KEYS=0 时没有按键扫描，虚拟按键不生效，只剩 's' 可看状态。
+ * 只在“按键不够/接线时不方便按”的台架测试期开；正式比赛和
+ * SORT_ENABLE_BENCH_KEYS 一起置 0。需要 USART3 的 RX（PB11）接到
+ * USB-TTL 的 TX；只接了 PB10 时串口只能看到输出、发不进命令。 */
+#define SORT_DEBUG_CONSOLE              1
+
+/* 1 = 打开 USART3 台架“运动指令”（需要 SORT_DEBUG_CONSOLE=1，共用同一个串口）：
+ *   X<步数>  移动 X（绝对微步，0..SORT_X_TRAVEL_STEPS）；X 单独发送 = 打印位置
+ *   Y<步数>  移动 Y（SORT_ENABLE_Y_AXIS=0 时提示 DISABLED）
+ *   T<1..6>  转盘到指定仓；T 单独发送 = 打印位置
+ *   ZT/ZB/ZM Z 到最上 1200 / 最下 2500 / 中间 1850 us；Z<脉宽> 指定脉宽
+ *   GO/GC    夹爪张开/闭合；G<脉宽> 指定脉宽
+ *   R / R<步数> / R<步数>,<仓> / RA
+ *            跑一遍“X+转盘 → 开爪 → Z 向下 → 闭爪 → Z 上升 → 等转盘”，RA 中止
+ *   ！运动指令是“一行一条”，必须以回车/换行结束（串口助手勾选“发送新行”）；
+ *     单字符按键 0~3 / A~D / s / h / x 不需要回车。
+ * 全部直接调用正式驱动（StepperMotor / ZServo / ServoGripper），不经过状态机，
+ * 所以不会和 sorting_task.c 抢逻辑；但序列运行期间 Protocol 会回 BUSY 拒收视觉任务。
+ * 与 USART2 视觉协议无关：摄像头照常接 PA2/PA3。正式比赛置 0。 */
+#define SORT_BENCH_MOTION               1
+
 /* box_id 不在 1..6 时，是否允许退回使用协议里的 drop_step。 */
 #define SORT_T_ALLOW_DROP_STEP_FALLBACK 1
 

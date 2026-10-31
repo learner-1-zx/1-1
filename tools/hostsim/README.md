@@ -40,6 +40,21 @@ X/Y 零点开关驱动的行为。
   内部上拉、低有效（压到 = 低）。test 11 校验引脚映射、极性换算、
   15 ms 触发/释放消抖（含中途抖动重新计时、两轴独立计时），
   以及非法轴编号安全返回；真实电平仍需用万用表在 PD6/PD5 上实测。
+- `BenchConsole_*`（USART3 台架控制台）：test 12 校验
+  `BenchConsole_Init()` 只挂一次单字节接收中断并打印横幅、
+  `0~3` 短按保持 100 ms（99 ms 仍按下、100 ms 自动释放）、
+  `A~D` 长按保持 1500 ms（1000 ms 时仍按下，覆盖“按住 1 s 存投放口”）、
+  `x` 立即释放、非法编号/空指针安全返回、`h` 帮助、未知命令提示，
+  以及串口助手附带的 CR/LF 不产生输出。
+  仿真只验证命令解析与虚拟按键时序；真机还要确认 PB11(USART3_RX)
+  已接到 USB-TTL 的 TX，且按键动作仍受“安全 + 无任务”门控。
+- `BenchMotion_*`（USART3 运动指令）：test 13 校验 `X1200` 的绝对目标、
+  软限位拒绝（`X30000`）、`ZT/ZB/Z<us>` 的脉宽与越界保护、`GO/GC/G<us>`、
+  `T1..T6` 按仓表补角、`R1200,3` 全流程的时序（开爪 → Z 下降 → 闭爪 →
+  Z 上升 → 等转盘 → DONE）、序列期间的指令拒绝、`RA` 中止和
+  “自动任务抢占时停轴退出”。步进电机用 `host_stub.c` 里的记录型桩
+  （`stepper_motor.c` 含 ARM 专用内联汇编，不能在 x86 上编译），
+  真实脉冲/加减速仍由实机验证。
 
 ## 原理
 
@@ -57,16 +72,24 @@ X/Y 零点开关驱动的行为。
 gcc -std=c99 -Wall -Wextra -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast `
   -o tools/hostsim/hostsim.exe `
   tools/hostsim/host_test.c tools/hostsim/host_stub.c `
+  Service/bench_console.c Service/bench_motion.c `
+  Service/debug_uart.c Service/safety_manager.c `
   Drivers/lcd_st7789.c Drivers/servo_z.c Drivers/servo_gripper.c Drivers/hall_sensor.c `
   Drivers/axis_home.c `
-  -I Core/Inc -I App -I Drivers -I Drivers/STM32F4xx_HAL_Driver/Inc `
+  -I Core/Inc -I App -I Service -I Drivers -I Drivers/STM32F4xx_HAL_Driver/Inc `
   -I Drivers/CMSIS/Device/ST/STM32F4xx/Include -I Drivers/CMSIS/Include `
   -DUSE_HAL_DRIVER -DSTM32F407xx -DSERVO_GRIPPER_CALIB_MODE=0 `
-  -DZSERVO_CALIB_MODE=0
+  -DZSERVO_CALIB_MODE=0 -DBENCH_CONSOLE_NO_STATUS=1
 .\tools\hostsim\hostsim.exe
 ```
 
 注意：
+
+- `-DBENCH_CONSOLE_NO_STATUS=1`：主机仿真只链接驱动层，不链接
+  `sorting_task.c` / `stepper_motor.c` / `servo_*` 等应用模块，所以把控制台的
+  `s`（状态打印）裁掉；固件里 `BENCH_CONSOLE_NO_STATUS` 默认是 0，'s' 正常工作。
+  同理 `SortingTask_HasMission()` 和 `StepperMotor_*` 由 `host_stub.c` 提供记录型桩，
+  **不要**把 `stepper_motor.c` 加进 hostsim 的源文件列表（重复符号）。
 
 - `-DSERVO_GRIPPER_CALIB_MODE=0`：`servo_gripper.h` 里该宏默认已经是 0（正式模式），
   这里显式写一遍，是为了防止有人临时改成 1 做标定后忘记改回，导致 test 8 大量失败。

@@ -18,8 +18,10 @@
 - TIM2：50 Hz、1 us 分辨率，PA1 / TIM2_CH2 驱动 Z 轴舵机硬件 PWM
 - TIM6：基础定时器，步进电机节拍
 - SPI2：ST7789V2 显示屏（240 x 320，SPI Mode 0）
-- USART2：OpenART mini 视觉模块
-- USART3：调试 / 备用串口（原串口屏方案已废弃）
+- USART2：OpenART mini 视觉模块（PA2/PA3）；坐标上传协议见
+  `VISION_PROTOCOL.md`（AA55+CRC16、17 字节任务载荷、ACK/DONE 应答）
+- USART3：调试 / 台架文字控制台（原串口屏方案已废弃）；PB10/PB11，115200 8N1，
+  `0~3`/`A~D` 可虚拟 KEY0~KEY3，详见 `tools/pc/README.md`
 
 ## 显示屏接口（2026-10-14 起）
 
@@ -61,6 +63,31 @@
   调 X 时把 `SORT_BENCH_KEY_Z_SERVO` 置 0、`SORT_BENCH_KEY_X_JOG` 置 1；
   改回 0 后恢复“安全且无任务、X 空闲时点动 X 轴（正/反，一次一个电机整圈）”；
   PA0/WK_UP（按下高电平）空闲
+
+## 台架串口控制台（2026-10-30）
+
+板载只有 KEY0~KEY3，接线/标定时经常腾不出手按键，因此在
+**USART3（PB10/PB11，115200 8N1）** 增加了文字控制台
+`Service/bench_console.c`，开关是 `sorting_config.h` 的 `SORT_DEBUG_CONSOLE`：
+
+- 电脑串口发 `0~3` = 短按 KEY0~KEY3（保持 100 ms）；`A~D` = 长按
+  KEY0~KEY3（保持 1500 ms，覆盖 KEY0“按住 1 s 存投放口 X”）；
+  `s` 打印状态/轴位置/Z 与夹爪脉宽/四个按键原始电平；`x` 释放；`h` 帮助；
+- 虚拟按键**只提供原始电平**，`main.c` 的 20 ms 消抖、“安全 + 无任务”门控、
+  按住连发、KEY0 长按判据全部复用，和真实按键走同一条代码路径；
+- 同一串口还有**运动指令**（`Service/bench_motion.c`，开关 `SORT_BENCH_MOTION`）：
+  `X1200` 移动 X、`T3` 转到 3 号仓、`ZT/ZB/Z<us>` 控 Z、`GO/GC` 控夹爪、
+  `R1200,3` 一键跑“X+转盘 → 开爪 → Z 下降 → 闭爪 → Z 上升 → 等转盘”、
+  `RA` 中止。全部直接调用正式驱动，不经过状态机，不和队友的自动流程抢逻辑；
+  序列运行期间 Protocol 对视觉任务回 BUSY；
+- 接收中断由 `protocol.c` 的 `HAL_UART_RxCpltCallback` 分发到
+  `BenchConsole_RxComplete()`，主循环 `BenchConsole_Process()` 解析，不在中断里做事；
+- USART2 仍是上位机/视觉协议，可用 `tools/pc/serial_tool.py` 直接发
+  `status/home/stop/reset/mission`，不依赖视觉模块在线；
+- 零代码备选：杜邦线把 PD0~PD3 短接到 GND 就等于按下对应键
+  （按键上拉、低有效），但**绝不能碰 PD13 急停**；
+- 正式比赛把 `SORT_DEBUG_CONSOLE`、`SORT_DEBUG_UART`、`SORT_ENABLE_BENCH_KEYS`
+  一起置 0；详细接线和命令见 `tools/pc/README.md`。
 
 ## 当前程序状态
 
@@ -205,6 +232,8 @@ XY 取料 -> Z 接近 -> 开爪 -> Z 下降 -> 闭爪 -> Z 抬升并并行转 T
 ## 测试与历史记录
 
 - `IO.md`：当前引脚分配。
+- `VISION_PROTOCOL.md`：视觉坐标上传协议（OpenART mini → USART2），
+  含帧格式、像素→微步换算、MicroPython 发送代码和联调顺序。
 - `LESSONS.md`：台架调试教训和未闭环事项。
 - `test.md`、`test_context.md`：旧舵机/步进台架测试记录，已删除；
   可复用结论已合并到 `LESSONS.md`。

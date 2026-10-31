@@ -37,14 +37,24 @@ typedef struct
 } StepperMotor_t;
 
 /* C99 指定初始化，避免结构体字段增加后出现位置错位。
- * X/Y 的 STEP 为高有效，T 轴驱动器按低有效预留；实际接线后以实测为准。 */
+ * X/Y 的 STEP 为高有效，T 轴驱动器按低有效预留；实际接线后以实测为准。
+ *
+ * dir_invert：整机转向与代码约定（步数增大 = 正方向）相反时置 1U。
+ * 它只反转 DIR 引脚电平，不改变位置正负、软限位和 SORT_X/Y_HOME_DIR 的
+ * 含义，是纠正接线方向的首选办法。
+ * 2026-10-28 实测：X 电机接成 A+→1B、A-→1A、B+→2B、B-→2A
+ * （1/16 细分，A4988），两相极性都反，按标准接法配置时 X 会朝离开关
+ * 的方向走，所以 X 的 dir_invert 置 1U。不要改 SORT_X_HOME_DIR，
+ * 那会把软限位方向整体翻转（0~+行程 ↔ -行程~0），
+ * 投放口/停车位坐标都要跟着改，容易乱。
+ * Y 轴接好后如果方向也反，同样只改 Y 的 dir_invert。 */
 static StepperMotor_t motors[STEPPER_COUNT] =
 {
   {
     .step_port = X_STEP_GPIO_Port, .step_pin = X_STEP_Pin,
     .dir_port = X_DIR_GPIO_Port, .dir_pin = X_DIR_Pin,
     .en_port = X_EN_GPIO_Port, .en_pin = X_EN_Pin,
-    .step_active_low = 0U, .dir_invert = 0U, .en_active_low = 1U
+    .step_active_low = 0U, .dir_invert = 1U, .en_active_low = 1U
   },
   {
     .step_port = Y_STEP_GPIO_Port, .step_pin = Y_STEP_Pin,

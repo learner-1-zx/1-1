@@ -38,6 +38,10 @@ tools/hostsim/*.exe
 !.vscode/launch.json
 *.code-workspace
 
+# Python 脚本缓存
+**/__pycache__/
+*.pyc
+
 # Operating system files
 .DS_Store
 Thumbs.db
