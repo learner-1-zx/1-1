@@ -36,7 +36,10 @@ typedef enum
    * 枚举值不变（0x84 状态事件直接发这个值，上位机可能有映射）。 */
   SORT_XY_HOMING_SEARCH,
   SORT_XY_HOMING_BACKOFF,
-  SORT_XY_HOMING_APPROACH
+  SORT_XY_HOMING_APPROACH,
+  /* 2026-11-05 新增：SORT_XY_BENCH_MODE 下 X/Y 两轴同时回零。
+   * 同样追加在末尾，不改已有编号。 */
+  SORT_XY_HOMING_BOTH
 } SortingState_t;
 
 /* 错误码与协议 ERROR 事件（0x83）的 detail 字段对应。 */

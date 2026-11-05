@@ -50,6 +50,36 @@ py -3 tools/pc/serial_tool.py -p COM6 console
   `SORT_BENCH_KEY_REPEAT_MS`（150 ms）连发，和按住实体键一致；
 - 虚拟按键到期自动失效，不会把某个键“卡在按下”。
 
+### 1.0 当前台架模式：XY 找零点 / 找软限位（2026-11-05）
+
+`App/sorting_config.h` 现在是 `SORT_XY_BENCH_MODE = 1`，按键语义整体换成 XY 点动：
+
+| 发送 | 动作（`SORT_XY_BENCH_KEY_GOTO_END=1`，当前） |
+|---|---|
+| `0` / `1` | X 到零点 `0` / X 到行程上限 `5400`（一键到底，约 7 s） |
+| `2` / `3` | Y 到零点 `0` / Y 到行程上限 `6800`（一键到底，约 9 s） |
+| `s` | 看 `STATE=` / `X_POS=` / `Y_POS=` / `POS_OK=` / `X_BUSY=` |
+
+（`SORT_XY_BENCH_KEY_GOTO_END=0` 时改回点动：一次 200 微步，`A`~`D` 长按按
+`SORT_XY_BENCH_JOG_REPEAT` 决定是否连发。）
+
+- 上电 X、Y **同时**慢速回零（不改 T），串口按
+  `X/Y STAGE=1(搜索) → 2(退让) → 3(慢速接近) → X_HOME OK DIR=-1` 打印，
+  期间还会打 `X_SW_PRESS` / `X_SW_RELEASE`（开关动作边沿）；
+  **压到开关后会先退一点再慢慢压回去才停**，正常；
+- 回零方向不对时电机往行程外走：**按任意方向键立刻停**（串口发 `0`~`3` 也行），
+  打印 `HOMING ABORT (key pressed)`；再用 `1`/`3` 确认哪边朝零点开关，
+  优先改 `Drivers/stepper_motor.c` 里该轴的 `dir_invert`（保持 `SORT_X/Y_HOME_DIR=-1`）；
+- 回零完成后用 `0`/`1`/`2`/`3`（或实体键）走到另一端，每次打印 `X_POS=` / `Y_POS=`
+  （本次目标位置）和 `POS_OK=1`（位置可信）；
+- **2026-11-05 行程已实测**（一按一步 200 微步）：X 点 28 次 = 5600、Y 点 36 次 = 7200，
+  取 `SORT_X_TRAVEL_STEPS=5400`（留 200 步）、`SORT_Y_TRAVEL_STEPS=6800`
+  （留 400 步；一键到底到 7000 时 Y 余量偏小，又多让 200 步），
+  `SORT_XY_BENCH_WIDE_LIMIT=0`：越界会打印
+  `X JOG REJECT LIMIT` / `Y JOG REJECT LIMIT`，不再撞机械端；
+- 两轴独立，可以同时动：串口先后发 `1`、`3` 让 X+ 和 Y+ 一起走（虚拟键同时有效），
+  也可直接用运动指令 `X3000` / `Y5000` 快速定位（受软限位保护）。
+
 ## 1.1 USART3 运动指令（不开视觉也能跑全流程）
 
 同一个 USART3、同一套串口设置，**大写字母开头**的命令直接驱动电机/舵机。
@@ -61,7 +91,7 @@ py -3 tools/pc/serial_tool.py -p COM6 console
 |---|---|
 | `X1200` | X 轴移动到绝对微步 1200（范围 `0..SORT_X_TRAVEL_STEPS`） |
 | `X` | 只打印当前 X 位置 |
-| `Y500` | Y 轴移动（`SORT_ENABLE_Y_AXIS=0` 时回 `DISABLED`） |
+| `Y500` | Y 轴移动（`SORT_ENABLE_Y_AXIS=0` 时回 `DISABLED`；当前已启用 Y） |
 | `T3` | 转盘转到 3 号仓（1..6，按仓表单向补角） |
 | `T` | 只打印当前 T 位置 |
 | `ZT` / `ZB` / `ZM` | Z 到最上 1200 / 最下 2500 / 中间 1850 us |

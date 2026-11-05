@@ -47,7 +47,8 @@
 - `X_HOME` / `Y_HOME`：**PD6 / PD5**，上拉输入；接 X/Y 零点机械限位开关
   （NO→IO、C→GND），**低电平有效**；读取和 15 ms 消抖在 `Drivers/axis_home.c`。
   上电按 X → Y → T 慢速回零，回零后软限位为 `0 ~ SORT_X/Y_TRAVEL_STEPS`；
-  当前 `SORT_ENABLE_Y_AXIS=0`，Y 驱动器不使能、不回零也不参与运动
+  2026-11-05 起 `SORT_ENABLE_Y_AXIS=1`，并处于台架找限位模式
+  （`SORT_XY_BENCH_MODE=1`：X/Y 同时回零、四键点动，见 SORTING_FLOW.md 8.13.6）
 - `EMERGENCY_STOP`：PD13，上拉输入，低电平有效
 - `GRIP_SENSOR`：PD14，上拉输入
 - `SPARE_PD11`：PD11，上拉输入备用；不再接霍尔（2026-10-23 改名）
@@ -98,10 +99,32 @@ ADC1 的初始化，并启动 Z 轴舵机、夹爪舵机和 ST7789V2 显示屏�
 （含上电回零期间、回零失败后的 ERROR）生效，KEY2/KEY3 当前用于 Z 轴
 一键到最下/最上，`ZSERVO_CALIB_MODE=0` 时恢复在 X 空闲时点动 X 轴。
 **2026-10-26 起 X/Y 有真实零点**：X=PD6、Y=PD5（普通限位开关，上拉低有效），
-上电按 **X → Y（`SORT_ENABLE_Y_AXIS=1` 时）→ T** 的顺序慢速回零
-（搜索 800 / 退让 400 / 慢速接近 120 步/秒），二次触发边沿记为 0 点，
-回零后软限位 `0 ~ SORT_X/Y_TRAVEL_STEPS`。当前 `SORT_ENABLE_Y_AXIS=0`，
-Y 驱动器不使能、不回零也不参与运动，先只调 X。
+正式流程（`SORT_XY_BENCH_MODE=0`）按 **X → Y → T** 的顺序慢速回零
+（正常档 800 / 400 / 120 步/秒，台架低速档 `SORT_XY_HOME_DEBUG_SLOW=1`
+时 400 / 200 / 60），二次触发边沿记为 0 点，回零后软限位
+`0 ~ SORT_X/Y_TRAVEL_STEPS`。
+**2026-11-05 起处于 XY 台架找限位模式**（`SORT_XY_BENCH_MODE=1`、
+`SORT_ENABLE_Y_AXIS=1`）：上电 X、Y **两轴同时**慢速回零（状态
+`SORT_XY_HOMING_BOTH`），不找 T，完成后直接 READY；
+四个按键改为 XY 控制 **KEY0 → X 到零点 0、KEY1 → X 到行程上限 5400、
+KEY2 → Y 到零点 0、KEY3 → Y 到行程上限 6800**（`SORT_XY_BENCH_KEY_GOTO_END=1`
+一键到底，800 步/秒 ≈10 mm/s；按住不连发；移动中按反方向键可立刻反向）。
+置 `SORT_XY_BENCH_KEY_GOTO_END=0` 则改回点动（一次 200 微步，`JOG_REPEAT`
+控制按住是否连发）。两轴独立、可同时运动（物理双键或 USART3 组合虚拟键）。
+软限位由 `SORT_XY_BENCH_WIDE_LIMIT` 决定：0（当前）= 按实测行程限位，
+1 = 放宽到 ±`SORT_XY_BENCH_POS_LIMIT`（200000，仅首次找行程用）。
+回零方向未确定时：方向反了按任意方向键立即停轴（USART3 打印
+`HOMING ABORT (key pressed)`），再用 KEY1/KEY3 确认哪边朝零点开关，
+**优先改该轴 `stepper_motor.c` 的 `dir_invert`**（保持
+`SORT_X/Y_HOME_DIR=-1`、坐标 0~+行程；直接改 HOME_DIR=+1 会把
+软限位翻成 -行程~0，投放口坐标要全部改成负数）。
+**2026-11-05 行程已实测**：`SORT_XY_BENCH_JOG_REPEAT=0`（一按一步 200 微步、
+按住不叠加）下，X 点 28 次 = 5600、Y 点 36 次 = 7200
+→ `SORT_X_TRAVEL_STEPS=5400`（留 200 步 ≈2.5 mm）、
+`SORT_Y_TRAVEL_STEPS=6800`（留 400 步 ≈5 mm；一键到底到 7000 时
+现场觉得 Y 余量偏小，又多让 200 步），`SORT_XY_BENCH_WIDE_LIMIT` 已改回 0。
+端点余量要用起来：量出还剩 M mm，把 TRAVEL 改成“实测位置 + M×80 − 余量”。
+正式跑流程前把 `SORT_XY_BENCH_MODE` 改回 0。
 **投放口由 STM32 自己保存**（上位机只发取料坐标）：默认值取
 `SORT_DROP_X/Y_STEP`；`SORT_XY_CALIB_MODE=1` 时 KEY2/KEY3 慢速 100 微步点动，
 KEY0 **按下即张开夹爪，按住满 `SORT_DROP_KEY_LONG_PRESS_MS`（1000 ms）

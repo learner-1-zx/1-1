@@ -38,11 +38,12 @@
 #endif
 
 /* 是否有台架按键需要“按住连发”：
+ *   - XY 找限位模式（SORT_XY_BENCH_MODE=1）：KEY0~KEY3 全部 XY 点动；
  *   - 夹爪标定（SORT_BENCH_KEY_JUMP=0）：KEY0/KEY1；
  *   - Z 轴逐档（SORT_BENCH_KEY_Z_SERVO=1 且 ZSERVO_BENCH_KEY2/3_JUMP=0）：
  *     对应的 KEY2/KEY3。
  * 一次到位模式（JUMP=1）按下一次就跳到目标，不需要连发。 */
-#if (SORT_BENCH_KEY_JUMP == 0) || \
+#if (SORT_XY_BENCH_MODE != 0) || (SORT_BENCH_KEY_JUMP == 0) || \
     ((SORT_BENCH_KEY_Z_SERVO != 0) && \
      ((ZSERVO_BENCH_KEY2_JUMP == 0) || (ZSERVO_BENCH_KEY3_JUMP == 0)))
 #define BENCH_KEY_REPEAT_ENABLED        1
@@ -283,7 +284,13 @@ static uint8_t BenchKey_Allowed(void)
   {
     return 0U;
   }
+#if SORT_XY_BENCH_MODE
+  /* XY 找限位台架：不接任务，只要安全就放开四个方向键。
+   * 回零中途按下方向键会先停轴接管（见 BenchXY_Jog），方便方向反了立即停。 */
+  return 1U;
+#else
   return (SortingTask_HasMission() == 0U) ? 1U : 0U;
+#endif
 }
 
 /* X 轴点动：KEY2 正向、KEY3 反向。回零后位置是相对零点的绝对步数，
@@ -342,6 +349,113 @@ static void BenchGripper_OpenAction(void)
   ServoGripper_StepOpening();
 }
 #endif
+
+#if SORT_XY_BENCH_MODE
+/* ---------------- XY 找限位台架：四键点动（2026-11-05） ----------------
+ * KEY0 = X 负向、KEY1 = X 正向、KEY2 = Y 负向、KEY3 = Y 正向。
+ * 一次按下走 SORT_XY_BENCH_JOG_STEPS（默认 200 微步 ≈ 2.5 mm）；
+ * 按住由 BenchKey_Process 的连发节拍每 SORT_BENCH_KEY_REPEAT_MS 再走一段。
+ * 两轴完全独立：物理同时按两个键，或 USART3 控制台先后发 "1" "3"
+ * （虚拟键同时有效），X/Y 会各自下发目标、由 TIM6 同时推进。
+ *
+ * 回零期间按下任一方向键：先调 SortingTask_Stop() 停轴并进 ERROR，
+ * 再执行这次点动，方便发现方向反了立刻接管，不用断电。
+ * 位置打印的是本次目标位置（运动是异步的，立即读 GetPosition 还是旧值）。 */
+static void BenchXY_Jog(uint8_t key_index)
+{
+  StepperAxis_t axis;
+  int8_t direction;
+  uint32_t speed;
+  int32_t target;
+
+  if (key_index > 3U)
+  {
+    return;
+  }
+  axis = (key_index < 2U) ? STEPPER_X : STEPPER_Y;
+  direction = ((key_index == 1U) || (key_index == 3U)) ? 1 : -1;
+
+  /* 回零中（两轴同时回零或单轴三段）按下方向键：停止找零点，交给人手动点。
+   * 用 SortingTask_Stop() 而不是只停电机：它会同时把状态机切到 ERROR，
+   * 下一轮不会再按“回零还在走”处理，也不会再自动起动。 */
+  switch (SortingTask_GetState())
+  {
+    case SORT_XY_HOMING_BOTH:
+    case SORT_XY_HOMING_SEARCH:
+    case SORT_XY_HOMING_BACKOFF:
+    case SORT_XY_HOMING_APPROACH:
+      SortingTask_Stop();
+#if SORT_DEBUG_UART
+      DebugUart_Write("HOMING ABORT (key pressed)\r\n");
+#endif
+      break;
+    default:
+      break;
+  }
+
+  /* 每次点动都用台架的慢速，避免自动任务的高速度把机构甩出去。 */
+#if SORT_XY_BENCH_KEY_GOTO_END
+  /* 一键到底是“绝对定位”，必须先有可信的零点；没回零时 0/5400 没有意义，
+   * 盲目移动可能直接撞端，所以直接拒绝，提示重新回零。 */
+  if (StepperMotor_IsPositionValid(axis) == 0U)
+  {
+#if SORT_DEBUG_UART
+    DebugUart_Write((axis == STEPPER_X) ? "X GOTO REJECT NOT HOMED\r\n"
+                                        : "Y GOTO REJECT NOT HOMED\r\n");
+#endif
+    return;
+  }
+  /* 目标直接取该方向端点（软限位值），速度用 800 步/秒。
+   * MIN/MAX 宏已经按 SORT_X/Y_HOME_DIR 取好符号，不用在这里判正负。 */
+  (void)direction;
+  if ((key_index == 1U) || (key_index == 3U))
+  {
+    target = (axis == STEPPER_X) ? SORT_X_MAX_STEP : SORT_Y_MAX_STEP;
+  }
+  else
+  {
+    target = (axis == STEPPER_X) ? SORT_X_MIN_STEP : SORT_Y_MIN_STEP;
+  }
+  speed = SORT_XY_BENCH_END_SPEED_STEPS_S;
+#else
+  target = StepperMotor_GetPosition(axis) +
+           (int32_t)direction * (int32_t)SORT_XY_BENCH_JOG_STEPS;
+  speed = SORT_XY_BENCH_JOG_SPEED_STEPS_S;
+#endif
+  StepperMotor_SetSpeed(axis, speed);
+  StepperMotor_SetAcceleration(axis, SORT_XY_ACCEL_STEPS_S2);
+
+  if (StepperMotor_IsTargetValid(axis, target) == 0U)
+  {
+#if SORT_DEBUG_UART
+    DebugUart_Write((axis == STEPPER_X) ? "X JOG REJECT LIMIT\r\n"
+                                        : "Y JOG REJECT LIMIT\r\n");
+#endif
+    return;
+  }
+  if (StepperMotor_MoveTo(axis, target) != HAL_OK)
+  {
+#if SORT_DEBUG_UART
+    DebugUart_Write((axis == STEPPER_X) ? "X JOG REJECT\r\n"
+                                        : "Y JOG REJECT\r\n");
+#endif
+    return;
+  }
+
+#if SORT_DEBUG_UART
+  /* 两轴各自打印，方便同时点动时对照机械位置；
+   * 回零失败/被按键中断后位置无效，这时只是“从当前计数再走这么多”，
+   * 不是相对零点的绝对坐标（POS_OK=0 时注意）。 */
+#if SORT_XY_BENCH_KEY_GOTO_END
+  DebugUart_WriteInt((axis == STEPPER_X) ? "X_GOTO=" : "Y_GOTO=", target);
+#else
+  DebugUart_WriteInt((axis == STEPPER_X) ? "X_POS=" : "Y_POS=", target);
+#endif
+  DebugUart_WriteInt("POS_OK=",
+                     (int32_t)StepperMotor_IsPositionValid(axis));
+#endif
+}
+#endif /* SORT_XY_BENCH_MODE */
 
 static void BenchKey_Process(void)
 {
@@ -484,6 +598,18 @@ static void BenchKey_Process(void)
         repeatable = 1U;
       }
 #endif
+#if SORT_XY_BENCH_MODE
+      /* XY 台架：放在最后，覆盖上面两段的结论。
+       * 一键到底模式目标固定，按住重复下发没有意义 → 不连发；
+       * 点动模式下由 SORT_XY_BENCH_JOG_REPEAT 决定是否按住连发。
+       * 量行程请直接读 X_POS/Y_POS，不要用“按了几次 × 200”折算
+       * （只有 JOG_REPEAT=0 时次数才等于步数）。 */
+#if SORT_XY_BENCH_KEY_GOTO_END
+      repeatable = 0U;
+#else
+      repeatable = (SORT_XY_BENCH_JOG_REPEAT != 0) ? 1U : 0U;
+#endif
+#endif
       if (repeatable != 0U)
       {
         act = 1U;
@@ -495,6 +621,12 @@ static void BenchKey_Process(void)
     {
 #if BENCH_KEY_REPEAT_ENABLED
       last_action_tick[i] = now;
+#endif
+#if SORT_XY_BENCH_MODE
+      /* XY 找限位台架：四个键全部给 XY 点动。
+       * 夹爪/Z 轴的按键语义整段跳过（continue），互不干扰。 */
+      BenchXY_Jog(i);
+      continue;
 #endif
 #if SORT_XY_CALIB_MODE
       /* 投放口标定：KEY0 按下即开爪并开始长按计时，长按满

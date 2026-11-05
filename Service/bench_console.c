@@ -78,6 +78,13 @@ static void Console_PrintHelp(void)
 {
   DebugUart_Write("\r\n--- BENCH CONSOLE (USART3 115200 8N1) ---\r\n");
   DebugUart_Write("0..3  tap  KEY0..KEY3 (100 ms)\r\n");
+#if SORT_XY_BENCH_MODE
+#if SORT_XY_BENCH_KEY_GOTO_END
+  DebugUart_Write("XY BENCH goto: 0=X0 1=Xmax 2=Y0 3=Ymax\r\n");
+#else
+  DebugUart_Write("XY BENCH jog: 0=X- 1=X+ 2=Y- 3=Y+ (A..D hold)\r\n");
+#endif
+#endif
   DebugUart_Write("A..D  hold KEY0..KEY3 (1500 ms, KEY0 >1 s saves DROP_X)\r\n");
   DebugUart_Write("x     release virtual keys\r\n");
   DebugUart_Write("s     state / positions / pulses / key levels\r\n");
@@ -105,6 +112,9 @@ static void Console_PrintStatus(void)
                      (int32_t)StepperMotor_IsPositionValid(STEPPER_X));
   DebugUart_WriteInt("X_BUSY=", (int32_t)StepperMotor_IsBusy(STEPPER_X));
   DebugUart_WriteInt("Y_POS=", StepperMotor_GetPosition(STEPPER_Y));
+  DebugUart_WriteInt("Y_POS_OK=",
+                     (int32_t)StepperMotor_IsPositionValid(STEPPER_Y));
+  DebugUart_WriteInt("Y_BUSY=", (int32_t)StepperMotor_IsBusy(STEPPER_Y));
   DebugUart_WriteInt("T_POS=", StepperMotor_GetPosition(STEPPER_T));
   DebugUart_WriteInt("Z_US=", (int32_t)ZServo_GetPulse());
   DebugUart_WriteInt("GRIP_US=", (int32_t)ServoGripper_GetPulse());

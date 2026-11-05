@@ -42,6 +42,40 @@ static int8_t homing_dir;
 /* 本段回零的起始位置，用于“走太远还没触发”的保护。 */
 static int32_t homing_start_step;
 
+#if SORT_XY_BENCH_MODE
+/* ---------------- XY 找限位台架：两轴同时回零（2026-11-05） ----------------
+ * 每个轴维护自己的一套阶段，互不等待；两轴都由 TIM6 每拍同时推进一步，
+ * 所以 X 和 Y 是真正并行回零（不是 X 走完再走 Y）。 */
+typedef enum
+{
+  XY_HOME_IDLE = 0,
+  XY_HOME_SEARCH,
+  XY_HOME_BACKOFF,
+  XY_HOME_APPROACH,
+  XY_HOME_DONE
+} XYHomeStage_t;
+
+typedef struct
+{
+  StepperAxis_t axis;
+  AxisHomeId_t home;
+  /* 朝零点开关的固定方向（= SORT_X/Y_HOME_DIR），整个过程不变。
+   * 不能拿它当“本阶段 Jog 方向”，否则退让一次就把方向改反了。 */
+  int8_t dir;
+  uint8_t stage;         /* XYHomeStage_t */
+  int32_t stage_start;   /* 本阶段起始步数，超程保护用 */
+  uint32_t stage_ms;     /* 本阶段进入时刻，超时保护用 */
+} XYHomeCtx_t;
+
+/* [0] = X，[1] = Y。SORT_ENABLE_Y_AXIS=0 时 [1] 直接置 DONE。 */
+static XYHomeCtx_t xy_home[2];
+
+/* 两轴同时回零的推进结果。 */
+#define XY_HOME_RUNNING   0U
+#define XY_HOME_COMPLETE  1U
+#define XY_HOME_ERROR     2U
+#endif
+
 #if SORT_DEBUG_UART
 /* 回零时打印零点引脚原始电平：1 = 高（未压到），0 = 低（压到）。
  * 现场排查用：手动按压开关看串口是否跟着变化，能立刻区分
@@ -136,11 +170,23 @@ static void SortingTask_ApplyXYMotionConfig(void)
 {
   StepperMotor_SetSpeed(STEPPER_X, SORT_XY_MAX_SPEED_STEPS_S);
   StepperMotor_SetAcceleration(STEPPER_X, SORT_XY_ACCEL_STEPS_S2);
+#if SORT_XY_BENCH_MODE && SORT_XY_BENCH_WIDE_LIMIT
+  /* 台架“找行程”阶段：软限位临时放大到 ±SORT_XY_BENCH_POS_LIMIT，
+   * 允许点动/串口绝对定位越过实测行程，一直走到真实机械端。 */
+  StepperMotor_SetSoftLimit(STEPPER_X, -SORT_XY_BENCH_POS_LIMIT,
+                            SORT_XY_BENCH_POS_LIMIT);
+#else
   StepperMotor_SetSoftLimit(STEPPER_X, SORT_X_MIN_STEP, SORT_X_MAX_STEP);
+#endif
 #if SORT_ENABLE_Y_AXIS
   StepperMotor_SetSpeed(STEPPER_Y, SORT_XY_MAX_SPEED_STEPS_S);
   StepperMotor_SetAcceleration(STEPPER_Y, SORT_XY_ACCEL_STEPS_S2);
+#if SORT_XY_BENCH_MODE && SORT_XY_BENCH_WIDE_LIMIT
+  StepperMotor_SetSoftLimit(STEPPER_Y, -SORT_XY_BENCH_POS_LIMIT,
+                            SORT_XY_BENCH_POS_LIMIT);
+#else
   StepperMotor_SetSoftLimit(STEPPER_Y, SORT_Y_MIN_STEP, SORT_Y_MAX_STEP);
+#endif
 #endif
 }
 
@@ -150,12 +196,23 @@ static void SortingTask_ApplyMotionConfig(void)
 {
   StepperMotor_SetSpeed(STEPPER_X, SORT_XY_MAX_SPEED_STEPS_S);
   StepperMotor_SetAcceleration(STEPPER_X, SORT_XY_ACCEL_STEPS_S2);
+#if SORT_XY_BENCH_MODE && SORT_XY_BENCH_WIDE_LIMIT
+  /* 台架找行程阶段上电就用宽软限位：回零失败后仍可点动排查。 */
+  StepperMotor_SetSoftLimit(STEPPER_X, -SORT_XY_BENCH_POS_LIMIT,
+                            SORT_XY_BENCH_POS_LIMIT);
+#else
   StepperMotor_SetSoftLimit(STEPPER_X, SORT_X_MIN_STEP, SORT_X_MAX_STEP);
+#endif
 
 #if SORT_ENABLE_Y_AXIS
   StepperMotor_SetSpeed(STEPPER_Y, SORT_XY_MAX_SPEED_STEPS_S);
   StepperMotor_SetAcceleration(STEPPER_Y, SORT_XY_ACCEL_STEPS_S2);
+#if SORT_XY_BENCH_MODE && SORT_XY_BENCH_WIDE_LIMIT
+  StepperMotor_SetSoftLimit(STEPPER_Y, -SORT_XY_BENCH_POS_LIMIT,
+                            SORT_XY_BENCH_POS_LIMIT);
+#else
   StepperMotor_SetSoftLimit(STEPPER_Y, SORT_Y_MIN_STEP, SORT_Y_MAX_STEP);
+#endif
 #else
   /* Y 轴暂不启用（硬件未接）：软限位收紧到 0..0，驱动器保持不使能。
    * 这样即使以后有漏掉的 Y 调用，也不会让 Y 意外动起来。 */
@@ -235,6 +292,221 @@ static uint8_t SortingTask_HomeExceededMaxSteps(void)
   }
   return (moved > limit) ? 1U : 0U;
 }
+
+#if SORT_XY_BENCH_MODE
+/* ---------------- XY 台架：两轴同时回零（2026-11-05） ---------------- */
+
+static int32_t SortingTask_XYHomeMaxSteps(StepperAxis_t axis)
+{
+  return (axis == STEPPER_X) ? SORT_X_HOME_MAX_STEPS : SORT_Y_HOME_MAX_STEPS;
+}
+
+/* 当前阶段走了多少步（取绝对值）。超过“行程 + 2000”说明开关没触发/
+ * 没释放、回零方向反了或机械卡死，立即停机，别顶着机械端失步。 */
+static uint8_t SortingTask_XYHomeExceeded(const XYHomeCtx_t *ctx)
+{
+  int32_t moved = StepperMotor_GetPosition(ctx->axis) - ctx->stage_start;
+
+  if (moved < 0)
+  {
+    moved = -moved;
+  }
+  return (moved > SortingTask_XYHomeMaxSteps(ctx->axis)) ? 1U : 0U;
+}
+
+static uint8_t SortingTask_XYHomeStageElapsed(const XYHomeCtx_t *ctx,
+                                              uint32_t ms)
+{
+  return ((uint32_t)(HAL_GetTick() - ctx->stage_ms) >= ms) ? 1U : 0U;
+}
+
+/* 让某一轴按指定方向/速度连续走一段，并切换阶段、记下本段起点。
+ * jog_dir 只是“本阶段怎么走”，不会改 ctx->dir（朝开关的固定方向）。
+ * AxisHome_ResetDebounce() 会同时清掉两轴的消抖计时；另一轴最多晚
+ * 15 ms（SORT_XY_HOME_DEBOUNCE_MS）再判定，不影响回零结果。 */
+static uint8_t SortingTask_XYHomeJog(XYHomeCtx_t *ctx, int8_t jog_dir,
+                                     uint32_t speed, XYHomeStage_t stage)
+{
+  StepperMotor_Stop(ctx->axis);
+  StepperMotor_SetAcceleration(ctx->axis, SORT_XY_ACCEL_STEPS_S2);
+  StepperMotor_SetSpeed(ctx->axis, speed);
+  AxisHome_ResetDebounce();
+
+  ctx->stage = (uint8_t)stage;
+  ctx->stage_start = StepperMotor_GetPosition(ctx->axis);
+  ctx->stage_ms = HAL_GetTick();
+
+#if SORT_DEBUG_UART
+  /* 阶段跟踪：1=搜索 2=退让 3=慢速接近。
+   * 正常顺序 1 -> 2 -> 3 -> "X_HOME OK DIR=-1"；
+   * 只停在 2 说明开关一直没释放（NC 接法/线碰地），不会自己走到 3。 */
+  DebugUart_WriteInt((ctx->axis == STEPPER_X) ? "X STAGE=" : "Y STAGE=",
+                     (int32_t)stage);
+  DebugUart_WriteInt("STAGE_POS=", ctx->stage_start);
+#endif
+
+  return (StepperMotor_JogStart(ctx->axis, jog_dir) == HAL_OK) ? 1U : 0U;
+}
+
+/* 上电入口：X、Y 同时开始找零点。
+ * 两轴的开关和方向分别取 SORT_X_HOME_DIR / SORT_Y_HOME_DIR；
+ * 返回 0 表示至少一轴 JogStart 失败（参数/驱动器异常）。 */
+static uint8_t SortingTask_StartXYBothHoming(void)
+{
+  uint8_t started = 1U;
+
+  xy_home[0].axis = STEPPER_X;
+  xy_home[0].home = AXIS_HOME_X;
+  xy_home[0].dir = (int8_t)SORT_X_HOME_DIR;
+#if SORT_ENABLE_Y_AXIS
+  xy_home[1].axis = STEPPER_Y;
+  xy_home[1].home = AXIS_HOME_Y;
+  xy_home[1].dir = (int8_t)SORT_Y_HOME_DIR;
+#else
+  xy_home[1].stage = (uint8_t)XY_HOME_DONE;
+#endif
+
+  StepperMotor_InvalidatePosition(STEPPER_X);
+#if SORT_ENABLE_Y_AXIS
+  StepperMotor_InvalidatePosition(STEPPER_Y);
+#endif
+
+  if (SortingTask_XYHomeJog(&xy_home[0], xy_home[0].dir,
+                            SORT_XY_HOME_SPEED_STEPS_S,
+                            XY_HOME_SEARCH) == 0U)
+  {
+    started = 0U;
+  }
+#if SORT_ENABLE_Y_AXIS
+  if (SortingTask_XYHomeJog(&xy_home[1], xy_home[1].dir,
+                            SORT_XY_HOME_SPEED_STEPS_S,
+                            XY_HOME_SEARCH) == 0U)
+  {
+    started = 0U;
+  }
+#endif
+  return started;
+}
+
+/* 推进一轴的一个阶段；返回 XY_HOME_ERROR 时调用方直接退出
+ * （SortingTask_Fail 已经把状态切到 SORT_ERROR 并停轴）。 */
+static uint8_t SortingTask_XYHomeAxisProcess(XYHomeCtx_t *ctx)
+{
+  switch ((XYHomeStage_t)ctx->stage)
+  {
+    case XY_HOME_SEARCH:
+      /* 第一段：压向零点开关，触发立即停并反向退让。 */
+      if (AxisHome_TriggeredDebounced(ctx->home,
+                                      SORT_XY_HOME_DEBOUNCE_MS) != 0U)
+      {
+#if SORT_DEBUG_UART
+        DebugUart_Write((ctx->axis == STEPPER_X) ? "X_SW_PRESS\r\n"
+                                                 : "Y_SW_PRESS\r\n");
+#endif
+        if (SortingTask_XYHomeJog(ctx, (int8_t)(-ctx->dir),
+                                  SORT_XY_HOME_BACKOFF_SPEED_STEPS_S,
+                                  XY_HOME_BACKOFF) == 0U)
+        {
+          SortingTask_Fail(SORT_ERR_HOMING);
+          return XY_HOME_ERROR;
+        }
+      }
+      break;
+
+    case XY_HOME_BACKOFF:
+      /* 第二段：反向退到开关释放，保证下一段是“从外侧压进来”。 */
+      if (AxisHome_ReleasedDebounced(ctx->home,
+                                     SORT_XY_HOME_DEBOUNCE_MS) != 0U)
+      {
+#if SORT_DEBUG_UART
+        DebugUart_Write((ctx->axis == STEPPER_X) ? "X_SW_RELEASE\r\n"
+                                                 : "Y_SW_RELEASE\r\n");
+#endif
+        if (SortingTask_XYHomeJog(ctx, ctx->dir,
+                                  SORT_XY_HOME_APPROACH_SPEED_STEPS_S,
+                                  XY_HOME_APPROACH) == 0U)
+        {
+          SortingTask_Fail(SORT_ERR_HOMING);
+          return XY_HOME_ERROR;
+        }
+      }
+      break;
+
+    case XY_HOME_APPROACH:
+      /* 第三段：慢速二次触发的边沿就是该轴 0 点，重复性最好。 */
+      if (AxisHome_TriggeredDebounced(ctx->home,
+                                      SORT_XY_HOME_DEBOUNCE_MS) != 0U)
+      {
+        StepperMotor_Stop(ctx->axis);
+        StepperMotor_SetPosition(ctx->axis, 0);
+        StepperMotor_SetSpeed(ctx->axis, SORT_XY_MAX_SPEED_STEPS_S);
+        StepperMotor_SetAcceleration(ctx->axis, SORT_XY_ACCEL_STEPS_S2);
+        ctx->stage = (uint8_t)XY_HOME_DONE;
+#if SORT_DEBUG_UART
+        /* DIR=+1 表示零点在步数最大端：正式软限位应设成“-行程~0”，
+         * SORT_X/Y_HOME_DIR 也要改成 +1（台架模式先不管）。 */
+        DebugUart_Write((ctx->axis == STEPPER_X) ? "X_HOME OK DIR="
+                                                 : "Y_HOME OK DIR=");
+        DebugUart_WriteInt("", (int32_t)ctx->dir);
+#endif
+      }
+      break;
+
+    default:
+      /* IDLE / DONE：没有动作。 */
+      break;
+  }
+
+  /* 只有“还在走”的阶段才检查超程/超时/提前停机。
+   * 刚切换到下一阶段时本阶段步数和计时都刚清零，不会误判。 */
+  if ((ctx->stage == (uint8_t)XY_HOME_SEARCH) ||
+      (ctx->stage == (uint8_t)XY_HOME_BACKOFF) ||
+      (ctx->stage == (uint8_t)XY_HOME_APPROACH))
+  {
+    if ((SortingTask_XYHomeExceeded(ctx) != 0U) ||
+        (SortingTask_XYHomeStageElapsed(ctx, SORT_XY_HOME_TIMEOUT_MS) != 0U) ||
+        (StepperMotor_IsBusy(ctx->axis) == 0U))
+    {
+      SortingTask_Fail(SORT_ERR_HOMING);
+      return XY_HOME_ERROR;
+    }
+  }
+  return XY_HOME_RUNNING;
+}
+
+/* 两轴总推进：任意一轴失败整体失败；两轴都 DONE 才算完成。 */
+static uint8_t SortingTask_ProcessXYBothHoming(void)
+{
+  uint8_t x_result;
+
+  x_result = SortingTask_XYHomeAxisProcess(&xy_home[0]);
+  if (x_result == XY_HOME_ERROR)
+  {
+    return XY_HOME_ERROR;
+  }
+#if SORT_ENABLE_Y_AXIS
+  {
+    uint8_t y_result = SortingTask_XYHomeAxisProcess(&xy_home[1]);
+
+    if (y_result == XY_HOME_ERROR)
+    {
+      return XY_HOME_ERROR;
+    }
+    if ((xy_home[0].stage == (uint8_t)XY_HOME_DONE) &&
+        (xy_home[1].stage == (uint8_t)XY_HOME_DONE))
+    {
+      return XY_HOME_COMPLETE;
+    }
+  }
+#else
+  if (xy_home[0].stage == (uint8_t)XY_HOME_DONE)
+  {
+    return XY_HOME_COMPLETE;
+  }
+#endif
+  return XY_HOME_RUNNING;
+}
+#endif /* SORT_XY_BENCH_MODE */
 
 #if SORT_DEBUG_UART
 /* 回零期间监视零点引脚原始电平，变化时打印。
@@ -684,6 +956,30 @@ void SortingTask_Process(void)
       break;
 
     case SORT_SYS_HOMING:
+#if SORT_XY_BENCH_MODE
+      /* 2026-11-05 台架找限位：X、Y 两轴**同时**慢速压向各自的零点开关，
+       * 方向取 SORT_X/Y_HOME_DIR，不找 T 轴（T 位置保持无效）。
+       * 两轴各自走 搜索 -> 退让 -> 慢速接近，任一轴失败整体报
+       * SORT_ERR_HOMING（USART3 打印 SORT_ERR=5），不会继续顶机械端。 */
+      StepperMotor_Enable(STEPPER_X, 1U);
+      StepperMotor_Enable(STEPPER_Y, 1U);
+      StepperMotor_InvalidatePosition(STEPPER_T);
+#if SORT_DEBUG_UART
+      /* 回零开始先打印两个零点引脚的实际电平（1=高/未压到，0=低/压到）。
+       * 按着 X 开关上电时如果变化的是 Y_HOME_PIN，说明线插到了 PD5。 */
+      DebugUart_WriteInt("X_HOME_PIN=",
+                         (AxisHome_ReadRaw(AXIS_HOME_X) == GPIO_PIN_RESET) ? 0 : 1);
+      DebugUart_WriteInt("Y_HOME_PIN=",
+                         (AxisHome_ReadRaw(AXIS_HOME_Y) == GPIO_PIN_RESET) ? 0 : 1);
+#endif
+      if (SortingTask_StartXYBothHoming() == 0U)
+      {
+        SortingTask_Fail(SORT_ERR_HOMING);
+        break;
+      }
+      SortingTask_Enter(SORT_XY_HOMING_BOTH);
+      break;
+#else
       /* 2026-10-26 起 X/Y 有真实零点开关（X=PD6、Y=PD5），
        * 顺序固定为 X -> Y（SORT_ENABLE_Y_AXIS=1 时）-> T。
        * 先把位置全部作废，回零没完成前不接受任务。 */
@@ -711,6 +1007,7 @@ void SortingTask_Process(void)
         SortingTask_Fail(SORT_ERR_HOMING);
       }
       break;
+#endif
 
     case SORT_XY_HOMING_SEARCH:
       /* 第一段：慢速压向零点开关，触发后立即停，不硬顶机械端。 */
@@ -808,6 +1105,40 @@ void SortingTask_Process(void)
         SortingTask_Fail(SORT_ERR_HOMING);
       }
       break;
+
+#if SORT_XY_BENCH_MODE
+    case SORT_XY_HOMING_BOTH:
+      /* X/Y 两轴同时回零的总推进（SORT_XY_BENCH_MODE=1 专用）。
+       * 两轴各自独立走阶段，任一轴失败 SortingTask_Fail 已切到 ERROR。 */
+      switch (SortingTask_ProcessXYBothHoming())
+      {
+        case XY_HOME_COMPLETE:
+#if SORT_XY_BENCH_KEEP_TURRET
+          /* 需要连 T 一起回零时走原来的 T 流程。 */
+          SortingTask_StartTurretHoming();
+#else
+          /* 台架只调 XY：两轴 0 点建好后直接 READY。
+           * T 轴位置仍然无效，视觉任务会被 Submit 拒绝，避免误动转盘。 */
+          SortingTask_ApplyXYMotionConfig();
+          SortingTask_Enter(SORT_SYS_READY);
+          Protocol_SendStatus((uint8_t)SORT_SYS_READY,
+                              (uint8_t)SORT_ERR_NONE);
+#if SORT_DEBUG_UART
+          DebugUart_Write("XY_HOME OK -> READY (SORT_XY_BENCH_MODE)\r\n");
+#endif
+#endif
+          break;
+
+        case XY_HOME_ERROR:
+          /* 已经进 SORT_ERROR，这里不用再处理。 */
+          break;
+
+        default:
+          /* 还在回零：等下一轮。 */
+          break;
+      }
+      break;
+#endif
 
     case SORT_T_HOMING_SEARCH:
       if (SortingTask_THomeDebounced() != 0U)

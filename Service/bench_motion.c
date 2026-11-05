@@ -115,8 +115,14 @@ uint8_t BenchMotion_GetLastBin(void)
 
 void BenchMotion_PrintHelp(void)
 {
+#if SORT_XY_BENCH_MODE
+  DebugUart_Write("X<step>  move X (abs, soft limit) X       show X\r\n");
+  DebugUart_Write("Y<step>  move Y (abs, soft limit) Y       show Y\r\n");
+  DebugUart_Write("T1..T6  turret to bin (T not homed in bench)\r\n");
+#else
   DebugUart_Write("X<step>  move X (0..20000)        X       show X\r\n");
   DebugUart_Write("Y<step>  move Y (disabled now)    T1..T6  turret to bin\r\n");
+#endif
   DebugUart_Write("ZT/ZB/ZM Z top1200/bottom2500/mid1850\r\n");
   DebugUart_Write("Z<us>    set Z pulse (1200..2500) Z       show Z\r\n");
   DebugUart_Write("GO/GC    gripper open/close       G<us>   set grip pulse\r\n");
@@ -140,7 +146,7 @@ static void Motion_MoveX(int32_t steps)
   }
   if (StepperMotor_IsTargetValid(STEPPER_X, steps) == 0U)
   {
-    Motion_Print("X", "REJECT RANGE 0..SORT_X_TRAVEL_STEPS");
+    Motion_Print("X", "REJECT RANGE (soft limit)");
     return;
   }
   if (StepperMotor_IsBusy(STEPPER_X) != 0U)

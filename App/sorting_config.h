@@ -69,12 +69,24 @@
 
 /* ---------------- X/Y 回零（2026-10-26 新增） ---------------- */
 
-/* Y 轴硬件尚未接好：0 = 只调试 X，Y 驱动器不上使能、不回零也不参与运动；
- * 1 = X/Y 都按真实零点开关回零。改回 1 前先确认 Y 限位开关已接到 PD5。 */
-#define SORT_ENABLE_Y_AXIS              0
+/* Y 轴是否参与回零/运动：0 = 只调试 X，Y 驱动器不上使能、不回零也不参与运动；
+ * 1 = X/Y 都按真实零点开关回零。
+ * 2026-11-05 起 X/Y 一起调，置 1。改回 0 前只有一种情况：
+ * Y 限位开关没接 PD5、驱动器没接 STEP/DIR/EN 时，用 0 保证它绝不会动。
+ * 注意：SORT_XY_BENCH_MODE=1 时本项必须为 1。 */
+#define SORT_ENABLE_Y_AXIS              1
 
 /* 回零方向：+1 步数增大，-1 步数减小。两个零点开关都装在步数最小端，
- * 所以默认 -1（朝负方向找零点）；实机方向反了（朝行程外走）就改 +1。 */
+ * 所以默认 -1（朝负方向找零点）；实机方向反了（朝行程外走）就改 +1。
+ *
+ * ！优先改 dir_invert，不要先动这里：步数增大/减小的“物理”方向由
+ * Drivers/stepper_motor.c 的 dir_invert 决定。改 HOME_DIR 会同时把软限位
+ * 从“0~+行程”翻成“-行程~0”，投放口/停车位/协议坐标都得跟着改成负数。
+ * 正确顺序：先确认“哪个按键方向朝零点开关” →
+ *   - 朝 +步数 走：把该轴 dir_invert 取反（X、Y 现在都是 1U），
+ *     这样 HOME_DIR=-1 就能朝开关走，坐标仍是 0~+行程；
+ *   - 朝 -步数 走：dir_invert 和 HOME_DIR 都保持现状即可。
+ * 只有机械上零点确实装在步数最大端时，才把 HOME_DIR 改成 +1。 */
 #define SORT_X_HOME_DIR                 (-1)
 #define SORT_Y_HOME_DIR                 (-1)
 
@@ -118,6 +130,82 @@
 /* 机械限位开关触点抖动比霍尔大，取 15 ms（转盘霍尔是 10 ms）。 */
 #define SORT_XY_HOME_DEBOUNCE_MS        15U
 
+/* ---------------- X/Y 找零点 + 找软限位台架模式（2026-11-05） ---------------- */
+
+/* 1 = XY 台架找限位模式（当前，硬件联调用）。行为：
+ *   1) 上电 X、Y 两轴**同时**慢速压向各自的零点开关（X=PD6、Y=PD5），
+ *      不找 T 轴；两轴各自触发、各自退让/慢速二次接近，互不等待。
+ *      方向取 SORT_X/Y_HOME_DIR（默认 -1 = 朝步数减小方向找零点）；
+ *      方向反了（朝行程外走），两轴会各走满“行程 + 2000 步”后报
+ *      SORT_ERR_HOMING（USART3 打印 SORT_ERR=5），此时按任意方向键
+ *      可以立刻停轴接管。纠正办法见下面 SORT_X/Y_HOME_DIR 的注释：
+ *      优先改对应轴的 dir_invert，保持 HOME_DIR=-1 和“0~+行程”。
+ *   2) 回零完成直接进 READY（T 轴位置仍未建立，视觉任务会被拒绝），
+ *      四个按键全部改为 XY 点动：
+ *        KEY0 = X 负向，KEY1 = X 正向，
+ *        KEY2 = Y 负向，KEY3 = Y 正向；
+ *      按一下走 SORT_XY_BENCH_JOG_STEPS（200 微步），
+ *      SORT_XY_BENCH_JOG_REPEAT=0（当前）时按住不叠加，一按一步；
+ *      =1 时按住每 SORT_BENCH_KEY_REPEAT_MS 再走一段。
+ *      每次点动从 USART3 打印 X_POS=/Y_POS=（目标位置）。
+ *      两轴完全独立，可以同时走：物理上同时按两个键，或 USART3 控制台
+ *      依次发 0/1/2/3 组合虚拟键（如 "1"+"3" 让 X+ 和 Y+ 同时动）。
+ *      USART3 的 X<步数>/Y<步数> 绝对定位指令仍可用，适合快速走到远端。
+ *   3) 软限位默认按 SORT_X/Y_MIN/MAX_STEP（= 0 ~ 实测行程）；
+ *      第一次找真实行程时把 SORT_XY_BENCH_WIDE_LIMIT 置 1，
+ *      临时放大到 ±SORT_XY_BENCH_POS_LIMIT 才能走到机械端。
+ *   0 = 正式分拣流程（X→Y 顺序回零 → T 回零，按键控制夹爪/Z 轴）。
+ * ！！找到真实行程后：把 SORT_X/Y_TRAVEL_STEPS 写回实测值、
+ *    SORT_XY_BENCH_WIDE_LIMIT 改回 0；正式跑流程前本项改回 0。 */
+#define SORT_XY_BENCH_MODE              1
+
+/* 台架点动步长/速度：200 微步 ≈ 2.5 mm（1/16 细分 + 20T/2 mm 同步轮
+ * 约 80 微步/mm），400 步/秒 ≈ 5 mm/s。
+ * 接近机械端时把 JOG_STEPS 改小（如 50），找完再改回来。 */
+#define SORT_XY_BENCH_JOG_STEPS         200
+#define SORT_XY_BENCH_JOG_SPEED_STEPS_S 400U
+
+/* 台架方向键的工作方式：
+ * 0 = 点动：按一下走 SORT_XY_BENCH_JOG_STEPS（200 微步），用于找行程/对位置。
+ * 1 = 一键到底（当前）：按一下直接移动到该方向端点，用来验证软限位：
+ *       KEY0 → X 回零点 0        KEY1 → X 到行程上限 SORT_X_MAX_STEP
+ *       KEY2 → Y 回零点 0        KEY3 → Y 到行程上限 SORT_Y_MAX_STEP
+ *     到点后应停在软限位上、机构还剩约 2.5 mm（200 步）余量；
+ *     如果没到点就顶住/异响，说明 TRAVEL_STEPS 比真实行程大，要减小。
+ *     一键到底模式下按住不连发（目标固定，重复下发没有意义）；
+ *     移动中按反方向的键会立刻改目标、反向走，可当作“回退/脱困”。
+ * 两种模式都支持 X/Y 同时动（同时按 KEY1+KEY3）。 */
+#define SORT_XY_BENCH_KEY_GOTO_END      1
+
+/* 一键到底的移动速度：800 步/秒 ≈ 10 mm/s
+ * （X 5400 步约 6.8 s、Y 6800 步约 8.5 s，含加减速）。 */
+#define SORT_XY_BENCH_END_SPEED_STEPS_S 800U
+
+/* 点动模式（SORT_XY_BENCH_KEY_GOTO_END=0）下是否按住连发：
+ * 1 = 按住每 SORT_BENCH_KEY_REPEAT_MS（150 ms）再走 SORT_XY_BENCH_JOG_STEPS；
+ * 0 = 一按一步、按住不叠加（量行程时推荐，次数 × 步长 = 行程）。 */
+#define SORT_XY_BENCH_JOG_REPEAT        0
+
+/* 1 = 台架模式软限位放宽到 ±SORT_XY_BENCH_POS_LIMIT（**量行程时必须为 1**）：
+ *     可以一直点动到机械端，没有任何行程保护，必须人盯着、随时松手。
+ * 0 = 台架模式也按实测行程限位（当前，2026-11-05 已量完）：
+ *     四键点动照样能用，但走到 SORT_X/Y_TRAVEL_STEPS 会被拒绝，
+ *     串口打印 X JOG REJECT LIMIT / Y JOG REJECT LIMIT，不会再撞机械端。
+ *     标投放口/取料点时保持 0。 */
+#define SORT_XY_BENCH_WIDE_LIMIT        0
+
+/* 宽限位的具体数值（只在 SORT_XY_BENCH_WIDE_LIMIT=1 时生效）。
+ * 故意大于任何可能行程，正负对称。 */
+#define SORT_XY_BENCH_POS_LIMIT         200000
+
+/* 1 = 台架模式 XY 回零完成后继续做 T 轴回零（T_HOME 霍尔已接好时用）；
+ * 0 = 只回 XY，完成即 READY（当前，先单独调 XY，不接 T 也不会卡 20 s 超时）。 */
+#define SORT_XY_BENCH_KEEP_TURRET       0
+
+#if (SORT_XY_BENCH_MODE != 0) && (SORT_ENABLE_Y_AXIS == 0)
+#error "SORT_XY_BENCH_MODE=1 requires SORT_ENABLE_Y_AXIS=1 (X and Y together)"
+#endif
+
 /* 夹爪对射传感器确认。传感器极性和安装位置未标定前先关闭。 */
 #define SORT_GRIP_VERIFY_ENABLE         0
 #define SORT_GRIP_SENSOR_ACTIVE_LOW     1
@@ -141,11 +229,19 @@
 /* X/Y 软限位（绝对步数）。回零完成后零点 = 0，行程向零点相反一侧展开：
  *   SORT_X/Y_HOME_DIR = -1（零点在步数最小端，默认）→ 0 ~ +行程；
  *   SORT_X/Y_HOME_DIR = +1（零点在步数最大端）      → -行程 ~ 0。
- * 20000 微步只是保守占位：1/16 细分 + 20T/2 mm 同步轮约 80 微步/mm
- * → 20000 步 ≈ 250 mm。实测行程后按“实测_mm × 80”收紧，
- * 宁小勿大（顶到机械端会丢步异响）。 */
-#define SORT_X_TRAVEL_STEPS             20000
-#define SORT_Y_TRAVEL_STEPS             20000
+ *
+ * 2026-11-05 实测（`SORT_XY_BENCH_JOG_REPEAT=0`，一按一步 = 200 微步）：
+ *   X：点 28 下 = 5600 步，到端点仍有余量；
+ *   Y：点 36 下 = 7200 步，到端点仍有余量。
+ * 软限位取“实测位置 − 余量”：
+ *   X 5400（留 200 步 ≈2.5 mm）；
+ *   Y 6800（留 400 步 ≈5 mm —— 一键到底到 7000 时现场觉得余量偏小，又多让 200 步）。
+ * 若还要更保守：每次减 200 步（≈2.5 mm）。要把余量用满：量出还剩 M mm，
+ * 改成“实测位置 + M×80 − 余量”。
+ * 1/16 细分 + 20T/2 mm 同步轮标称约 80 微步/mm，仅用于粗估；
+ * 真实步数/毫米 = 实测步数 ÷ 用尺量的毫米数。 */
+#define SORT_X_TRAVEL_STEPS             5400
+#define SORT_Y_TRAVEL_STEPS             6800
 #if (SORT_X_HOME_DIR < 0)
 #define SORT_X_MIN_STEP                 0
 #define SORT_X_MAX_STEP                 SORT_X_TRAVEL_STEPS

@@ -47,7 +47,9 @@ typedef struct
  * 的方向走，所以 X 的 dir_invert 置 1U。不要改 SORT_X_HOME_DIR，
  * 那会把软限位方向整体翻转（0~+行程 ↔ -行程~0），
  * 投放口/停车位坐标都要跟着改，容易乱。
- * Y 轴接好后如果方向也反，同样只改 Y 的 dir_invert。 */
+ * 2026-11-05 实测：Y 轴按同样的接法也会朝离开关的方向走（回零方向反了），
+ * 所以 Y 的 dir_invert 同样置 1U。SORT_Y_HOME_DIR 仍保持 -1，
+ * Y 坐标依旧是 0 ~ +行程；改完必须重新回零（旧位置不再可信）。 */
 static StepperMotor_t motors[STEPPER_COUNT] =
 {
   {
@@ -60,7 +62,7 @@ static StepperMotor_t motors[STEPPER_COUNT] =
     .step_port = Y_STEP_GPIO_Port, .step_pin = Y_STEP_Pin,
     .dir_port = Y_DIR_GPIO_Port, .dir_pin = Y_DIR_Pin,
     .en_port = Y_EN_GPIO_Port, .en_pin = Y_EN_Pin,
-    .step_active_low = 0U, .dir_invert = 0U, .en_active_low = 1U
+    .step_active_low = 0U, .dir_invert = 1U, .en_active_low = 1U
   },
   {
     .step_port = T_STEP_GPIO_Port, .step_pin = T_STEP_Pin,
