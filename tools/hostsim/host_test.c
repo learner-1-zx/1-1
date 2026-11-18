@@ -265,7 +265,7 @@ static void test_z_servo(void)
 
   ZServo_SetPulse(3000U);
   CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_MAX_US,
-        "above range is clamped to 2500 us");
+        "above range is clamped to 2150 us");
 
   ZServo_SetPulse(1750U);
   CHECK(host_tim2_regs.CCR2 == 1750U, "in range pulse is written unchanged");
@@ -305,22 +305,21 @@ static void test_z_servo(void)
   CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_MIN_US,
         "StepPulse(0) leaves the pulse unchanged");
 
-  /* 一键到位（2026-10-27 实测：最上 1200 us / 最下 2500 us）。
-   * 台架按键 ZSERVO_BENCH_KEY2/3_JUMP=1 时 KEY2 到最下面、KEY3 到最上面。 */
+  /* 一键到位（2026-11-08：最上 1200 us / 最低工作位 2150 us）。 */
   ZServo_JumpTo(ZSERVO_PULSE_BOTTOM_US);
   CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_BOTTOM_US,
-        "JumpTo(BOTTOM) writes 2500 us directly");
+        "JumpTo(BOTTOM) writes 2150 us directly");
   ZServo_JumpTo(ZSERVO_PULSE_TOP_US);
   CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_TOP_US,
         "JumpTo(TOP) writes 1200 us directly");
   CHECK(ZSERVO_PULSE_TOP_US == 1200U, "measured TOP endpoint is 1200 us");
-  CHECK(ZSERVO_PULSE_BOTTOM_US == 2500U, "measured BOTTOM endpoint is 2500 us");
+  CHECK(ZSERVO_PULSE_BOTTOM_US == 2150U, "lowest working position is 2150 us");
   CHECK(ZSERVO_PULSE_TOP_US < ZSERVO_PULSE_BOTTOM_US,
         "TOP pulse is smaller than BOTTOM pulse (smaller pulse = higher)");
 
-  CHECK((ZSERVO_PULSE_TRAVEL_US < ZSERVO_PULSE_APPROACH_US) &&
+  CHECK((ZSERVO_PULSE_TRAVEL_US == ZSERVO_PULSE_APPROACH_US) &&
         (ZSERVO_PULSE_APPROACH_US < ZSERVO_PULSE_GRASP_US),
-        "height order is TRAVEL < APPROACH < GRASP");
+        "no mid height: TRAVEL == APPROACH < GRASP");
 }
 
 static void test_gripper_servo(void)
@@ -328,11 +327,12 @@ static void test_gripper_servo(void)
   uint32_t i;
   uint32_t starts;
 
-  /* BDS300 2026-10-25 重新标定：闭合临界 1400 us、张开临界 1750 us，
-   * 正式值各留 20 us 余量（1420/1730）；换舵机后同步修改这里。
-   * 2026-10-23 软启动：Init() 不启动 PWM、不写 CCR1，软件脉宽从安全中位
-   * 1500 us 开始；第一次 Open()/Close() 先以 1500 us 启动 PWM，再由
-   * Process() 按 50 us / 20 ms 缓动到目标，避免一帧跳 310 us 撞进端点。
+  /* BDS300 2026-11-08 重新标定：闭合临界 1700 us、张开临界 2050 us，
+   * 正式值各留 20 us 余量（1720/2030）；换舵机后同步修改这里。
+   * 上电行为：Init() 不启动 PWM、不写 CCR1，软件脉宽从 START_PULSE 开始，
+   * 正式模式下它等于张开位（2030 us = 停机位置）。第一次 Open() 直接以
+   * 张开位启动 PWM，所以上电时舵机不会“先合一下再张开”地摆一下。
+   * 之后 Open()/Close() 仍由 Process() 按 50 us / 20 ms 缓动到目标。
    * 当前夹爪用 PA8 / TIM1_CH1 硬件 PWM，不再需要更新/比较中断。 */
   printf("test 8: gripper servo TIM1_CH1 (PA8) hardware PWM + soft start\n");
   host_reset();
@@ -340,9 +340,11 @@ static void test_gripper_servo(void)
 
   CHECK(SERVO_PWM_Pin == GPIO_PIN_8, "gripper PWM pin must be PA8");
   CHECK(SERVO_PWM_GPIO_Port == GPIOA, "gripper PWM port must be GPIOA");
+  CHECK(SERVO_GRIPPER_START_PULSE_US == SERVO_GRIPPER_OPEN_PULSE_US,
+        "power-on first frame equals the open pulse (no swing at boot)");
   CHECK((SERVO_GRIPPER_START_PULSE_US > SERVO_GRIPPER_MIN_PULSE_US) &&
         (SERVO_GRIPPER_START_PULSE_US < SERVO_GRIPPER_MAX_PULSE_US),
-        "safe start pulse sits strictly inside the 1400~1750 us window");
+        "start pulse sits strictly inside the measured 1700~2050 us window");
 
   ServoGripper_Init();
   CHECK(host_pwm_grip_start == 0U,
@@ -354,7 +356,7 @@ static void test_gripper_servo(void)
   CHECK(host_tim1_regs.CCR1 == 0U,
         "power-on leaves CCR1 untouched (no output while LCD_Init runs)");
   CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_START_PULSE_US,
-        "driver state starts from the safe mid pulse, not the end stop");
+        "driver state starts from the open pulse (the parking position)");
   CHECK(ServoGripper_IsClosed() == 0U, "gripper reports open after init");
   CHECK(host_gpio_pa8_mode == GPIO_MODE_OUTPUT_PP,
         "Init parks PA8 as a push-pull output (no floating servo signal)");
@@ -363,53 +365,53 @@ static void test_gripper_servo(void)
   CHECK(host_gpio_pa8_level == 0U,
         "parked PA8 is driven low, same as an unplugged signal wire");
 
-  /* 上电后第一次 Open()：启动 PWM，但第一帧必须是安全中位 1500 us，
-   * 不能像以前那样直接写 1730 us（一帧跳完 310 us 行程）。 */
+  /* 上电后第一次 Open()：启动 PWM，第一帧直接就是张开位（2030 us）——
+   * 与停机位置一致，所以上电时舵机不会先合一下再张开。 */
   ServoGripper_Open();
   CHECK(host_pwm_grip_start == 1U,
         "first Open starts TIM1 channel 1 when PWM is not running");
-  CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_START_PULSE_US,
-        "first Open energises at the safe mid pulse, not at the open end stop");
+  CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_OPEN_PULSE_US,
+        "first Open energises directly at the open pulse (no power-on swing)");
   CHECK(host_gpio_pa8_mode == GPIO_MODE_AF_PP,
         "first Open hands PA8 back to alternate function mode");
   CHECK(host_gpio_pa8_af == GPIO_AF1_TIM1,
         "PA8 alternate function is TIM1_CH1");
   CHECK(host_gpio_pa8_mode_at_pwm_start == GPIO_MODE_AF_PP,
         "PA8 is already AF1 when the PWM starts (no floating first frame)");
-  CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_START_PULSE_US,
-        "Open only retargets, the slew loop moves the pulse");
+  CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_OPEN_PULSE_US,
+        "Open retargets to the pulse the driver already sits at");
   CHECK(ServoGripper_IsClosed() == 0U, "Open reports open");
 
-  /* 缓动节拍：20 ms 未到不动，到了才走 SERVO_GRIPPER_SLEW_US。 */
-  host_tick_ms += (SERVO_GRIPPER_SLEW_PERIOD_MS - 1U);
+  /* 已经在张开位：过了 20 ms 缓动节拍也不会产生任何步进。 */
+  host_tick_ms += SERVO_GRIPPER_SLEW_PERIOD_MS;
   ServoGripper_Process();
-  CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_START_PULSE_US,
-        "no slew step before the 20 ms period elapses");
-  host_tick_ms += 1U;
-  ServoGripper_Process();
-  CHECK(ServoGripper_GetPulse() ==
-            (uint16_t)(SERVO_GRIPPER_START_PULSE_US + SERVO_GRIPPER_SLEW_US),
-        "one slew step changes the pulse by SERVO_GRIPPER_SLEW_US");
-
-  for (i = 0U; i < 16U; ++i)
-  {
-    host_tick_ms += SERVO_GRIPPER_SLEW_PERIOD_MS;
-    ServoGripper_Process();
-  }
-  CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_OPEN_PULSE_US,
-        "slew reaches the open pulse and stops there");
   CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_OPEN_PULSE_US,
-        "reported pulse follows the slew");
+        "Process leaves the pulse alone when it already equals the target");
+  CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_OPEN_PULSE_US,
+        "CCR1 stays at the open pulse after the slew tick");
+
   CHECK(host_pwm_grip_start == 1U,
         "Open reuses the already running PWM (no double start)");
   CHECK(ServoGripper_IsClosed() == 0U, "gripper reports open");
 
-  /* 闭合同样是缓动：先不跳变，到位后 CCR1 才是 1420 us。 */
+  /* 闭合同样是缓动：先不跳变，到位后 CCR1 才是 1720 us。 */
   ServoGripper_Close();
   CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_OPEN_PULSE_US,
         "Close retargets instead of jumping to the close pulse");
   CHECK(ServoGripper_IsClosed() == 1U,
         "Close updates the closed flag immediately");
+
+  /* 缓动节拍：20 ms 未到不动，到了才走 SERVO_GRIPPER_SLEW_US。 */
+  host_tick_ms += (SERVO_GRIPPER_SLEW_PERIOD_MS - 1U);
+  ServoGripper_Process();
+  CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_OPEN_PULSE_US,
+        "no slew step before the 20 ms period elapses");
+  host_tick_ms += 1U;
+  ServoGripper_Process();
+  CHECK(ServoGripper_GetPulse() ==
+            (uint16_t)(SERVO_GRIPPER_OPEN_PULSE_US - SERVO_GRIPPER_SLEW_US),
+        "one slew step changes the pulse by SERVO_GRIPPER_SLEW_US");
+
   for (i = 0U; i < 16U; ++i)
   {
     host_tick_ms += SERVO_GRIPPER_SLEW_PERIOD_MS;
@@ -431,7 +433,7 @@ static void test_gripper_servo(void)
 
   ServoGripper_JumpTo(1000U, 1U);
   CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_MIN_PULSE_US,
-        "JumpTo clamps below the measured 1400 us mechanical window");
+        "JumpTo clamps below the measured 1700 us mechanical window");
   CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_MIN_PULSE_US,
         "reported pulse follows the JumpTo clamp");
   CHECK(ServoGripper_IsClosed() == 1U,
@@ -441,7 +443,7 @@ static void test_gripper_servo(void)
   starts = host_pwm_grip_start;
   ServoGripper_Init();
   CHECK(ServoGripper_GetPulse() == SERVO_GRIPPER_START_PULSE_US,
-        "re-Init returns the driver state to the safe mid pulse");
+        "re-Init returns the driver state to the open pulse");
   ServoGripper_JumpTo(SERVO_GRIPPER_CLOSE_PULSE_US, 1U);
   CHECK(host_pwm_grip_start == (starts + 1U),
         "first JumpTo after power-on starts TIM1 channel 1");
@@ -456,7 +458,7 @@ static void test_gripper_servo(void)
         "open-close travel is 310 us (350 us measured, 20 us margin each side)");
   CHECK((SERVO_GRIPPER_CLOSE_PULSE_US >= SERVO_GRIPPER_MIN_PULSE_US) &&
         (SERVO_GRIPPER_OPEN_PULSE_US <= SERVO_GRIPPER_MAX_PULSE_US),
-        "both positions stay inside the measured 1400~1750 us window");
+        "both positions stay inside the measured 1700~2050 us window");
 }
 
 /* 霍尔开关接 PD12/T_HOME：内部上拉，低有效（有磁铁 = 低）。
@@ -628,6 +630,10 @@ static void test_bench_console(void)
         "Init arms the USART3 single-byte RX interrupt once");
   CHECK(strstr(host_uart_text(), "BENCH CONSOLE READY") != NULL,
         "Init prints the console banner");
+  CHECK(strstr(host_uart_text(), "ok") != NULL,
+        "Init sends the power-on ok handshake");
+  CHECK(strstr(host_uart_text(), "T-PARALLEL") != NULL,
+        "Init prints the new firmware version tag");
 
   /* 短按 KEY2：100 ms 内保持按下，之后自动释放，其他键不受影响。 */
   host_tick_ms = 1000U;
@@ -663,6 +669,10 @@ static void test_bench_console(void)
   BenchConsole_Process();
   CHECK(BenchConsole_GetVirtualKey(1U, &pressed) == 1U, "'B' presses KEY1");
   BenchConsole_FeedByte((uint8_t)'x');
+  /* 小写 'x' 现在走单词缓冲，靠 100 ms 空闲超时执行；输出仍是 RELEASE ALL。
+   * 第一次 Process 只把字节收进单词缓冲，推进时基后再 Process 才触发执行。 */
+  BenchConsole_Process();
+  host_tick_ms += BENCH_MOTION_WORD_IDLE_MS + 1U;
   BenchConsole_Process();
   CHECK(strstr(host_uart_text(), "RELEASE ALL") != NULL,
         "'x' reports release");
@@ -677,13 +687,39 @@ static void test_bench_console(void)
   host_reset();
   BenchConsole_FeedByte((uint8_t)'h');
   BenchConsole_Process();
+  host_tick_ms += BENCH_MOTION_WORD_IDLE_MS + 1U;
+  BenchConsole_Process();
   CHECK(strstr(host_uart_text(), "0..3") != NULL, "'h' prints the help text");
 
+  /* 单字符 z 现在会打印 Z 脉宽（单词指令），不再报 UNKNOWN。 */
   host_reset();
   BenchConsole_FeedByte((uint8_t)'z');
   BenchConsole_Process();
+  host_tick_ms += BENCH_MOTION_WORD_IDLE_MS + 1U;
+  BenchConsole_Process();
+  CHECK(strstr(host_uart_text(), "Z US=") != NULL,
+        "single 'z' reports the Z pulse");
+
+  /* 串口助手不勾“发送新行”：整词 zup 靠 100 ms 空闲超时执行。 */
+  host_reset();
+  BenchConsole_FeedByte((uint8_t)'z');
+  BenchConsole_FeedByte((uint8_t)'u');
+  BenchConsole_FeedByte((uint8_t)'p');
+  BenchConsole_Process();
+  host_tick_ms += BENCH_MOTION_WORD_IDLE_MS + 1U;
+  BenchConsole_Process();
+  CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_TRAVEL_US,
+        "'zup' without CR/LF runs after the idle timeout");
+
+  /* 未知单词仍然提示。 */
+  host_reset();
+  BenchConsole_FeedByte((uint8_t)'z');
+  BenchConsole_FeedByte((uint8_t)'z');
+  BenchConsole_Process();
+  host_tick_ms += BENCH_MOTION_WORD_IDLE_MS + 1U;
+  BenchConsole_Process();
   CHECK(strstr(host_uart_text(), "UNKNOWN CMD") != NULL,
-        "unknown command is reported");
+        "unknown word is reported");
 
   host_reset();
   BenchConsole_FeedByte((uint8_t)'\r');
@@ -721,10 +757,18 @@ static void test_bench_motion(void)
   StepperMotor_SetSpeed(STEPPER_X, SORT_XY_MAX_SPEED_STEPS_S);
   StepperMotor_SetAcceleration(STEPPER_X, SORT_XY_ACCEL_STEPS_S2);
   StepperMotor_SetSoftLimit(STEPPER_X, SORT_X_MIN_STEP, SORT_X_MAX_STEP);
+#if SORT_ENABLE_Y_AXIS
+  StepperMotor_SetSpeed(STEPPER_Y, SORT_XY_MAX_SPEED_STEPS_S);
+  StepperMotor_SetAcceleration(STEPPER_Y, SORT_XY_ACCEL_STEPS_S2);
+  StepperMotor_SetSoftLimit(STEPPER_Y, SORT_Y_MIN_STEP, SORT_Y_MAX_STEP);
+#endif
   StepperMotor_SetSpeed(STEPPER_T, SORT_T_MAX_SPEED_STEPS_S);
   StepperMotor_SetAcceleration(STEPPER_T, SORT_T_ACCEL_STEPS_S2);
   StepperMotor_SetSoftLimit(STEPPER_T, SORT_T_MIN_STEP, SORT_T_MAX_STEP);
   StepperMotor_SetPosition(STEPPER_X, 0);
+#if SORT_ENABLE_Y_AXIS
+  StepperMotor_SetPosition(STEPPER_Y, 0);
+#endif
   StepperMotor_SetPosition(STEPPER_T, 0);
   host_mission_active = 0U;
 
@@ -749,11 +793,11 @@ static void test_bench_motion(void)
   feed_command("ZT");
   CHECK(host_tim2_regs.CCR2 == 1200U, "ZT moves Z to the top (1200 us)");
   feed_command("ZB");
-  CHECK(host_tim2_regs.CCR2 == 2500U, "ZB moves Z to the bottom (2500 us)");
-  feed_command("Z2200");
-  CHECK(host_tim2_regs.CCR2 == 2200U, "Z2200 sets an explicit pulse");
+  CHECK(host_tim2_regs.CCR2 == 2150U, "ZB moves Z to the lowest (2150 us)");
+  feed_command("Z2000");
+  CHECK(host_tim2_regs.CCR2 == 2000U, "Z2000 sets an explicit pulse");
   feed_command("Z9999");
-  CHECK(host_tim2_regs.CCR2 == 2200U, "Z9999 is rejected, pulse unchanged");
+  CHECK(host_tim2_regs.CCR2 == 2000U, "Z9999 is rejected, pulse unchanged");
 
   /* 夹爪：GO/GC 直接到位，G<us> 越界被拒 */
   feed_command("GO");
@@ -804,7 +848,7 @@ static void test_bench_motion(void)
 
   host_tick_ms += BENCH_MOTION_GRIP_SETTLE_MS;
   BenchMotion_Process();
-  CHECK(host_tim2_regs.CCR2 == 2500U, "sequence lowers Z to the bottom");
+  CHECK(host_tim2_regs.CCR2 == 2150U, "sequence lowers Z to the lowest (2150)");
 
   host_tick_ms += BENCH_MOTION_Z_SETTLE_MS;
   BenchMotion_Process();
@@ -813,8 +857,8 @@ static void test_bench_motion(void)
 
   host_tick_ms += BENCH_MOTION_GRIP_SETTLE_MS;
   BenchMotion_Process();
-  CHECK(host_tim2_regs.CCR2 == 1220U,
-        "sequence lifts Z to the travel height (1220 us)");
+  CHECK(host_tim2_regs.CCR2 == 1200U,
+        "sequence lifts Z to the top (1200 us)");
 
   host_tick_ms += BENCH_MOTION_Z_SETTLE_MS;
   BenchMotion_Process();
@@ -883,6 +927,84 @@ static void test_bench_motion(void)
   CHECK(BenchMotion_IsBusy() == 1U, "R 1000 , 2 accepts spaces and comma");
   feed_command("RA");
   CHECK(BenchMotion_IsBusy() == 0U, "RA aborts the spaced R command");
+
+  /* ---------------- 小写单词指令（2026-11-05） ---------------- */
+  StepperMotor_StopAll();
+  StepperMotor_SetPosition(STEPPER_X, 0);
+#if SORT_ENABLE_Y_AXIS
+  StepperMotor_SetPosition(STEPPER_Y, 0);
+#endif
+  StepperMotor_SetPosition(STEPPER_T, 0);
+  host_mission_active = 0U;
+  host_tick_ms += 1000U;
+
+  host_reset();
+  feed_command("ok");
+  CHECK(strstr(host_uart_text(), "ok") != NULL, "word 'ok' echoes ok");
+
+  host_reset();
+  feed_command("zup");
+  CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_TRAVEL_US,
+        "'zup' goes to the travel height");
+  feed_command("zdown");
+  CHECK(host_tim2_regs.CCR2 == ZSERVO_PULSE_GRASP_US,
+        "'zdown' goes to the grasp height");
+
+  host_reset();
+  feed_command("zk");
+  CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_OPEN_PULSE_US,
+        "'zk' opens the gripper");
+  feed_command("gb");
+  CHECK(host_tim1_regs.CCR1 == SERVO_GRIPPER_CLOSE_PULSE_US,
+        "'gb' closes the gripper");
+
+  host_reset();
+  StepperMotor_SetPosition(STEPPER_X, 0);
+  feed_command("xmax");
+  CHECK(StepperMotor_GetRemaining(STEPPER_X) == SORT_X_MAX_STEP,
+        "'xmax' targets the X soft limit");
+  StepperMotor_SetPosition(STEPPER_X, SORT_X_MAX_STEP);
+  feed_command("xmin");
+  CHECK(StepperMotor_GetRemaining(STEPPER_X) == SORT_X_MAX_STEP,
+        "'xmin' returns to the X zero");
+
+#if SORT_ENABLE_Y_AXIS
+  StepperMotor_SetPosition(STEPPER_Y, 0);
+  feed_command("ymax");
+  CHECK(StepperMotor_GetRemaining(STEPPER_Y) == SORT_Y_MAX_STEP,
+        "'ymax' targets the Y soft limit");
+  StepperMotor_SetPosition(STEPPER_Y, SORT_Y_MAX_STEP);
+  feed_command("ymin");
+  CHECK(StepperMotor_GetRemaining(STEPPER_Y) == SORT_Y_MAX_STEP,
+        "'ymin' returns to the Y zero");
+#endif
+
+  host_reset();
+  feed_command("zero");
+  CHECK(strstr(host_uart_text(), "HOMING START") != NULL,
+        "'zero' requests homing from READY");
+
+  /* T 轴手动点动：不依赖回零，查驱动器用 */
+  host_reset();
+  StepperMotor_SetPosition(STEPPER_T, 0);
+  feed_command("tjog");
+  CHECK(StepperMotor_GetRemaining(STEPPER_T) == BENCH_MOTION_T_JOG_STEPS,
+        "'tjog' jogs the turret forward 2000 steps");
+  StepperMotor_Stop(STEPPER_T);
+  feed_command("tjog-");
+  CHECK(StepperMotor_GetRemaining(STEPPER_T) == BENCH_MOTION_T_JOG_STEPS,
+        "'tjog-' jogs the turret backward 2000 steps");
+
+  host_reset();
+  StepperMotor_SetPosition(STEPPER_X, 0);
+  feed_command("x1200");
+  CHECK(StepperMotor_GetRemaining(STEPPER_X) == 1200,
+        "'x1200' is the lowercase form of X1200");
+
+  host_reset();
+  feed_command("bogus");
+  CHECK(strstr(host_uart_text(), "UNKNOWN CMD") != NULL,
+        "an unknown word is reported");
 }
 
 int main(void)

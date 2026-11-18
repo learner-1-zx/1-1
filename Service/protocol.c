@@ -141,6 +141,10 @@ static void Protocol_HandleFrame(uint8_t command, const uint8_t *payload,
     }
 #endif
 
+    /* 视觉坐标 → 机械微步（SORT_VISION_COORD_MAP=1 时）。
+     * 线上字段仍叫 pick_x_step/pick_y_step，但内容是视觉坐标。 */
+    SortingTask_MapVisionMission(&mission);
+
     if (SortingTask_Submit(&mission) != 0U)
     {
       Protocol_SendEvent(PROTOCOL_EVENT_ACK, mission.task_id);

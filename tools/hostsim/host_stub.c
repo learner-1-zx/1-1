@@ -284,6 +284,28 @@ uint8_t SortingTask_HasMission(void)
   return host_mission_active;
 }
 
+/* 小写单词指令 zero/stop/reset 需要这几个状态机入口；主机仿真不链接
+ * sorting_task.c，这里统一按“READY、无任务、操作成功”模拟，
+ * 只验证命令解析和输出文本，真实回零时序由实机验证。 */
+SortingState_t SortingTask_GetState(void)
+{
+  return SORT_SYS_READY;
+}
+
+uint8_t SortingTask_RequestHoming(void)
+{
+  return 1U;
+}
+
+uint8_t SortingTask_ResetFault(void)
+{
+  return 1U;
+}
+
+void SortingTask_Stop(void)
+{
+}
+
 /* ---------------- 步进电机桩（tools/hostsim 不链接 stepper_motor.c） ----------------
  * stepper_motor.c 用 __disable_irq()/__get_PRIMASK() 等 ARM 专用内联汇编，
  * 不能在 x86 主机上编译；这里用“只记录目标/位置”的桩代替，

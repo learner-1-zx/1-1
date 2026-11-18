@@ -30,7 +30,10 @@ typedef enum
  * memcpy sizeof，以免上位机按紧凑结构发送 17 字节时长度不匹配。
  *
  * 偏移：task_id(0,2) class_id(2) box_id(3)
- *       pick_x_step(4,4) pick_y_step(8,4) drop_step(12,4) state(16) */
+ *       pick_x_step(4,4) pick_y_step(8,4) drop_step(12,4) state(16)
+ *       注意：2026-11-08 起固件默认 SORT_VISION_COORD_MAP=1，
+ *       pick_x_step/pick_y_step 字段承载视觉坐标（默认 mm），
+ *       由 SortingTask_MapVisionMission() 转成机械微步。 */
 #define SORT_MISSION_WIRE_SIZE 17U
 
 typedef struct

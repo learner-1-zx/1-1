@@ -1,0 +1,20 @@
+# Cline 项目规则（精简版，2026-11-18）
+
+1. 默认先读 `AI_CONTEXT.md`、`AI_RULES.md`、`CHANGELOG.md`。
+   历史 md（IO/LESSONS/PROJECT_CONTEXT/SORTING_FLOW）
+   不要全文读取，按需定向查；当前参数以 `AI_CONTEXT.md` 为准。
+
+2. **创建任何新的 `.py` 文件之前，必须先向用户说明目的、输入/输出、依赖、
+   为什么现有工具不够，并征得用户明确同意；未同意不得创建。**
+   修改现有 `.py` 的行为/接口也同样先说明并征得同意。
+   不得在临时目录或别的路径偷偷创建 `.py` 绕过。
+
+3. 不修改 X/Y 驱动代码、`dir_invert`、线序补偿，除非用户明确要求。
+   T 轴只改 `T_STEP_ACTIVE_LOW / T_DIR_INVERT / T_EN_ACTIVE_LOW`。
+
+4. 最小改动；不删除/移动现有文件；不改硬件引脚/时钟/串口参数，除非明确要求。
+
+5. 修改后至少做语法检查和 `tools/hostsim` 回归；更新 `CHANGELOG.md`，
+   当前参数变化时同步 `AI_CONTEXT.md`。
+
+6. 不重新创建旧的 `ls.md` 调试记录，除非用户明确要求。

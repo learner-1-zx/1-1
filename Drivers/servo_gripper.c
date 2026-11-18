@@ -3,12 +3,14 @@
 
 /* 夹爪舵机：PA8 / TIM1_CH1 硬件 PWM，50 Hz、1 us 分辨率。
  *
- * 2026-10-25 重新标定：闭合临界 1400 us、张开临界 1750 us，
- * 正式值各留 20 us 余量（CLOSE 1420 / OPEN 1730），限幅 1400~1750。
+ * 2026-11-08 重新标定：闭合临界 1700 us、张开临界 2050 us，
+ * 正式值各留 20 us 余量（CLOSE 1720 / OPEN 2030），限幅 1700~2050。
  * 上电不执行往返自检、也不启动 PWM，位置完全由状态机决定：
- *   1. 脉宽复位到安全中位 1500 us；
- *   2. 第一次 Open()/Close() 才启动 PWM，第一帧输出 1500 us；
- *   3. Process() 按 50 us / 20 ms 缓动到目标（350 us ≈ 140 ms），
+ *   1. 软件脉宽复位到 START_PULSE：正式模式 = 张开位 2030 us
+ *      （停机就停在张开位，第一帧与当前位置一致，上电不摆动），
+ *      标定模式 = 1500 us 零点；
+ *   2. 第一次 Open()/Close() 才启动 PWM，第一帧输出上面的起始脉宽；
+ *   3. Process() 按 50 us / 20 ms 缓动到目标（310 us ≈ 140 ms），
  *      不会一帧跳完整个行程撞端点；JumpTo() 才一次写到位（台架/标定用）。
  */
 
@@ -17,12 +19,13 @@ static uint8_t gripper_closed;
  * 第一次 Open/Close/JumpTo 写脉宽时由 ServoGripper_EnsurePwm() 启动。 */
 static uint8_t gripper_pwm_started;
 /* 由主循环写入 CCR1；16 位访问在 Cortex-M4 上是原子的。
- * 初始值取安全中位，避免上电第一帧就是某个机械端点。 */
+ * 初始值取 START_PULSE：正式模式 = 张开位（停机位置），保证第一次启动
+ * PWM 时第一帧就是夹爪当前所在的位置，上电不会先合一下再张开。 */
 static volatile uint16_t gripper_pulse_us = SERVO_GRIPPER_START_PULSE_US;
 static uint16_t gripper_target_pulse_us = SERVO_GRIPPER_START_PULSE_US;
 static uint32_t gripper_last_step_tick;
 
-/* 限幅到实测机械临界 1400~1750 us，避免误写把舵机顶过死点。 */
+/* 限幅到实测机械临界 1700~2050 us，避免误写把舵机顶过死点。 */
 static uint16_t ServoGripper_ClampPulse(uint16_t pulse)
 {
   if (pulse < SERVO_GRIPPER_MIN_PULSE_US)
@@ -68,7 +71,8 @@ static void ServoGripper_AttachSignal(void)
 
 /* 启动保护：若 PWM 尚未启动，先切回 AF1、写当前脉宽，再启动 TIM1_CH1。
  * Init() 有意不启动 PWM，所以上电后第一次 Open()/Close()/JumpTo() 一定会
- * 走到这里。上电时当前脉宽是安全中位 1500 us，第一帧不会落在 1400/1750 端点上。 */
+ * 走到这里。正式模式下当前脉宽 = 张开位（停机位置），所以第一帧就是夹爪
+ * 实际停留的位置，不会先往闭合方向抽一下。 */
 static void ServoGripper_EnsurePwm(void)
 {
 #if SERVO_GRIPPER_DISABLE_OUTPUT
@@ -110,8 +114,9 @@ void ServoGripper_Init(void)
   /* 上电不上力：不写 CCR1、不启动 TIM1_CH1，位置完全由状态机决定
    * （SORT_SYS_INIT 会调 ServoGripper_Open()）。以前这里写 1500 us 就启动
    * PWM，LCD_Init() 的 430 ms 阻塞里舵机会先走到中间位，表现为“上电先合
-   * 一下再张开”。pulse/target 复位到安全中位而非端点，第一次 Open/Close
-   * 由 EnsurePwm() 先输出 1500 us 再缓动，不会一上电就顶死。 */
+   * 一下再张开”。现在 pulse/target 复位到 START_PULSE：正式模式就是张开位
+   * （2030 us，= 停机位置），第一次 Open() 由 EnsurePwm() 直接以张开位起力，
+   * 状态机再 Open() 也不改脉宽，所以上电时舵机不会摆动。 */
   gripper_pulse_us = SERVO_GRIPPER_START_PULSE_US;
   gripper_target_pulse_us = SERVO_GRIPPER_START_PULSE_US;
   gripper_last_step_tick = HAL_GetTick();
@@ -133,7 +138,8 @@ void ServoGripper_Open(void)
   gripper_closed = 0;
 #else
   /* 只改目标，由 Process() 缓动过去；EnsurePwm() 保证第一次调用时
-   * 以当前脉宽（上电为安全中位 1500 us）启动 PWM。 */
+   * 以当前脉宽启动 PWM——正式模式下当前脉宽就是张开位，所以上电第一次
+   * Open() 的第一帧与夹爪实际位置一致，不会先合一下再张开。 */
   ServoGripper_SetTarget(SERVO_GRIPPER_OPEN_PULSE_US);
   ServoGripper_EnsurePwm();
   gripper_closed = 0;

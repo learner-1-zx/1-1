@@ -17,8 +17,8 @@
  *   Y<步数>       Y 轴移动（SORT_ENABLE_Y_AXIS=0 时提示 DISABLED）
  *   T<1..6>       转盘转到指定仓（单向/最短路径按 sorting_config.h 配置）
  *   T             只打印当前 T 位置
- *   ZT / ZB / ZM  Z 到最上(1200) / 最下(2500) / 中间(1850) us
- *   Z<脉宽>       Z 到指定脉宽（1200..2500），例：Z2200
+ *   ZT / ZB       Z 到最上(1200) / 最低工作位(2150) us
+ *   Z<脉宽>       Z 到指定脉宽（1200..2150），例：Z2000
  *   Z             只打印当前 Z 脉宽
  *   GO / GC       夹爪张开 / 闭合（JumpTo 一次到位，标定模式下同样有效）
  *   G<脉宽>       夹爪到指定脉宽（按 SERVO_GRIPPER_MIN/MAX 限幅）
@@ -28,12 +28,30 @@
  *   R<步数>,<仓>  设定 X 和仓号后跑，例：R1200,3
  *   RA            中止正在跑的序列
  *
+ * 2026-11-05 新增小写“单词指令”（全流程联调最常用，不需要记大小写缩写）：
+ *   ok            回显 ok（另外上电时固件自动发一次 ok）
+ *   zup            Z 到最上（ZSERVO_PULSE_TRAVEL_US，1200 us）
+ *   zdown          Z 到最低工作位（ZSERVO_PULSE_GRASP_US，2150 us）
+ *   ztop/zbottom         Z 到 1200/2150 us（最上/最低工作位）
+ *   xmax / xmin    X 到软限位上限 SORT_X_MAX_STEP / 零点 SORT_X_MIN_STEP
+ *   ymax / ymin    Y 到软限位上限 / 零点
+ *   tjog / tjog-   转盘相对 +2000 / -2000 微步（不要求先回零，查 T 驱动器用）
+ *   zero / home    恢复零点：READY 重新回零；ERROR/急停松开后先复位再回零
+ *   zk / go       机械爪张开（同 GO）
+ *   gb / gc       机械爪闭合（同 GC）
+ *   stop          软停止；reset 清故障并回零；status 打印状态
+ *   run           用上次 X/仓号跑 R 序列；abort 中止
+ *   x1200 / y500 / t3 / z2200 / g1650   小写数字指令，等价于大写版本
+ * 单词可以用回车/换行结束；串口助手不勾“发送新行”时，最后一个字符后
+ * BENCH_MOTION_WORD_IDLE_MS 内没有新字符也会自动执行。
+ * 大写 X/Y/T/Z/G/R 仍按原来的“一行一条”解析，两者互不影响。
+ *
  * 全流程 R 的顺序（每一步都从 USART3 打印，方便对着机械看）：
  *   1) X 与新仓同时起步（T 与 XY 并行）；
  *   2) X 到位 → 夹爪张开 → 等 GRIP_SETTLE；
- *   3) Z 到最下（2500）→ 等 Z_SETTLE；
+ *   3) Z 到最低工作位（2150）→ 等 Z_SETTLE；
  *   4) 夹爪闭合 → 等 GRIP_SETTLE；
- *   5) Z 到运输高度（1220）→ 等 Z_SETTLE；
+ *   5) Z 到最上（1200）→ 等 Z_SETTLE；
  *   6) 等转盘到位 → SEQ DONE。
  * 注意：本序列不含“移动到投放口/开爪投放”，那部分属于正式流程（队友）。
  *
@@ -49,6 +67,16 @@
  * 超过这个时间还没收到回车/换行就把这半条命令丢掉并提示，
  * 避免残留的命令行把后面的 0~3 按键吞成参数。 */
 #define BENCH_MOTION_LINE_TIMEOUT_MS     1500U
+
+/* 小写单词指令的“自动结尾”时间：串口助手不勾“发送新行”时，
+ * 收到 zup 的最后一个 p 后 100 ms 没有新字符就执行。
+ * 115200 下整词只要约 0.3 ms，留 100 ms 足够容错；
+ * 手动逐字键入时建议每个词后加回车，或保持每字间隔 < 100 ms。 */
+#define BENCH_MOTION_WORD_IDLE_MS        100U
+
+/* tjog / tjog- 每次相对转动的微步数：16640 步/圈时 2000 步 ≈ 43°，
+ * 肉眼能明显看到转盘动，又不会一下转太远。 */
+#define BENCH_MOTION_T_JOG_STEPS         2000
 
 /* 清空解析状态与序列（上电初始化时调用）。 */
 void BenchMotion_Init(void);

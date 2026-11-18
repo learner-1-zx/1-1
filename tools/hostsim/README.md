@@ -1,3 +1,6 @@
+> 项目当前状态见根目录 [`AI_CONTEXT.md`](../../AI_CONTEXT.md)；本文件只说明主机仿真。
+
+
 # 主机仿真复核（tools/hostsim）
 
 不接硬件的纯软件复核工具，用于验证显示驱动、Z 轴舵机、夹爪舵机、霍尔驱动和
@@ -19,13 +22,14 @@ X/Y 零点开关驱动的行为。
   以及上电和 `SetSafePosition()` 回到运输高度；
 - `ServoGripper_*`：PA8 / TIM1_CH1 硬件 PWM。
   上电 `ServoGripper_Init()` 不启动 PWM、不写 CCR1（PA8 无输出、舵机不上力），
-  软件脉宽从安全中位 1500 us 开始，同时把 PA8 拉成推挽低电平；
-  第一次 `Open()`/`Close()` 只改目标，由 `EnsurePwm()` 先把 PA8 切回 AF1、
-  以 1500 us 写 CCR1 再启动 PWM，随后 `ServoGripper_Process()` 按 50 us / 20 ms
-  缓动到 1420/1730 us，到位即停。
-  test 8 校验安全中位起力、20 ms 节拍、单步 50 us、到位值、
+  软件脉宽从 `START_PULSE` 开始（正式模式 = 张开位 2030 us，即停机位置），
+  同时把 PA8 拉成推挽低电平；
+  第一次 `Open()` 由 `EnsurePwm()` 先把 PA8 切回 AF1、以 2030 us 写 CCR1
+  再启动 PWM —— 第一帧就是夹爪当前所在的位置，所以上电不会摆动；
+  之后 `ServoGripper_Process()` 按 50 us / 20 ms 缓动到 1720/2030 us，到位即停。
+  test 8 校验第一帧等于张开位、20 ms 节拍、单步 50 us、到位值、
   PA8 待机为输出低电平、启动瞬间已是 `GPIO_AF1_TIM1`（不留浮空毛刺）、
-  1400～1750 us 限幅窗口和 `IsClosed()` 状态。
+  1700～2050 us 限幅窗口和 `IsClosed()` 状态。
   同时校验台架按键用的 `JumpTo()`：仍直接写 CCR1 一次到位、限幅、同步 `IsClosed()`，
   以及“PWM 未启动时由第一次 JumpTo 补启动”。
   当前不再使用 TIM1 更新/比较中断；同时断言夹爪不占用 PD8，也不使用 PA9。
@@ -52,7 +56,10 @@ X/Y 零点开关驱动的行为。
   软限位拒绝（`X30000`）、`ZT/ZB/Z<us>` 的脉宽与越界保护、`GO/GC/G<us>`、
   `T1..T6` 按仓表补角、`R1200,3` 全流程的时序（开爪 → Z 下降 → 闭爪 →
   Z 上升 → 等转盘 → DONE）、序列期间的指令拒绝、`RA` 中止和
-  “自动任务抢占时停轴退出”。步进电机用 `host_stub.c` 里的记录型桩
+  “自动任务抢占时停轴退出”。小写单词部分覆盖 `ok` 回显、
+  `zup/zdown`（1200/2150 us）、`zk/gb`（1730/1420 us）、
+  `xmax/xmin`、`ymax/ymin`、`zero` 回零请求、`x1200` 和未知单词提示。
+  步进电机用 `host_stub.c` 里的记录型桩
   （`stepper_motor.c` 含 ARM 专用内联汇编，不能在 x86 上编译），
   真实脉冲/加减速仍由实机验证。
 
@@ -97,11 +104,11 @@ gcc -std=c99 -Wall -Wextra -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast `
   那不是主机仿真要验证的行为；正式模式是上电不上力、缓动到 1420/1730、限幅 1400~1750。
   改完标定值（8.12）后也用这条命令回归。
 
-- `-DZSERVO_CALIB_MODE=0`：`servo_z.h` 里该宏当前默认是 **1**（台架手动：
-  上电停 1850、`Travel/Approach/Grasp` 不改脉宽），这里显式按 0 编译，
-  让 test 7 验证正式模式的“上电到运输位 + 正限幅”行为。
-  正式模式：上电到运输位 1220 us、限幅 1200~2500、工作高度 1220/1850/2480。
-  跑自动流程前记得把 `servo_z.h` 的 `ZSERVO_CALIB_MODE` 改 0。
+- `-DZSERVO_CALIB_MODE=0`：`servo_z.h` 里该宏当前默认是 **0**（正式模式：
+  上电到 1200 us、Travel/Approach/Grasp = 1200/1200/2150、限幅 1200~2150），
+  这里显式按 0 编译，让 test 7 验证正式模式行为。
+  正式模式：上电到 1200 us（ztop）、限幅 1200~2150、工作高度 1200/1200/2150。
+  跑自动流程前 `servo_z.h` 的 `ZSERVO_CALIB_MODE` 应保持 0。
 
 - 主机是 64 位环境，CMSIS 头文件里少量指针/整数互转会产生告警，
   所以加 `-Wno-int-to-pointer-cast -Wno-pointer-to-int-cast`；

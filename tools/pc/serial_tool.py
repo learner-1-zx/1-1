@@ -14,7 +14,7 @@
    python tools/pc/serial_tool.py -p COM5 home
    python tools/pc/serial_tool.py -p COM5 stop
    python tools/pc/serial_tool.py -p COM5 reset
-   python tools/pc/serial_tool.py -p COM5 mission --id 1 --class 2 --box 3 --x 1200 --y 0
+   python tools/pc/serial_tool.py -p COM5 mission --id 1 --class 2 --box 3 --x 0 --y 0
    python tools/pc/serial_tool.py -p COM5 monitor
 
 依赖：pip install pyserial（只有真正收发串口时才需要；--selftest 不依赖）。
@@ -303,8 +303,8 @@ def main():
     mission.add_argument("--id", type=int, default=1, help="task_id (0~65535)")
     mission.add_argument("--class", dest="cls", type=int, default=1, help="class_id")
     mission.add_argument("--box", type=int, default=1, help="box_id (1~6)")
-    mission.add_argument("--x", type=int, default=0, help="取料 pick_x_step")
-    mission.add_argument("--y", type=int, default=0, help="取料 pick_y_step")
+    mission.add_argument("--x", type=int, default=0, help="取料视觉坐标 X（默认 mm）")
+    mission.add_argument("--y", type=int, default=0, help="取料视觉坐标 Y（默认 mm）")
     mission.add_argument("--drop", type=int, default=0, help="drop_step 回退值")
     mission.add_argument("--state", type=int, default=1, help="mission.state")
 

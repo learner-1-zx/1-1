@@ -7,13 +7,13 @@
 /* 夹爪舵机：BDS300（7.4 V、10 kg·cm、0.13 s/60°），信号 PA8 / TIM1_CH1，
  * 50 Hz、1 us 分辨率，所以下面的脉宽值就是 CCR1 数值（单位 us）。
  *
- * 2026-10-25 重新标定（上电 1500 us，每步 50 us）：
- *   KEY0 5 次到张开临界 = 1750 us；KEY1 2 次到闭合临界 = 1400 us；行程 350 us。
+ * 2026-11-08 重新标定（每步 50 us）：
+ *   KEY0 到张开临界 = 2050 us；KEY1 到闭合临界 = 1700 us；行程 350 us。
  * 正式值各留 20 us 余量，避免自动流程长时间顶在机械死点：
- *   CLOSE = 1400 + 20 = 1420 us
- *   OPEN  = 1750 - 20 = 1730 us
- * 限幅收紧到实测机械临界 1400~1750 us，手动按键最多到临界、不会越过。
- * ！！CLOSE 绝不能小于 1400：曾误改成 1340，闭合时直接顶死在机械限位上，
+ *   CLOSE = 1700 + 20 = 1720 us
+ *   OPEN  = 2050 - 20 = 2030 us
+ * 限幅收紧到实测机械临界 1700~2050 us，手动按键最多到临界、不会越过。
+ * ！！CLOSE 绝不能小于 1700：曾误改成 1340，闭合时直接顶死在机械限位上，
  *   舵机堵转嗡嗡响、机构被顶变形，随后整个夹爪行程都乱了。
  * 实机方向相反时把 OPEN / CLOSE 两个宏对调即可。
  *
@@ -25,7 +25,8 @@
  *     （状态机抢不走夹爪），限幅放宽到 CALIB_MIN~CALIB_MAX，KEY0/KEY1 每次
  *     ±STEP_US 手动找机械两端。重新标定时把它改回 1，标定完必须改回 0，
  *     否则自动流程“夹爪完全不动”。
- * 0 = 正式：上电不上力，第一次 Open()/Close() 才启动 PWM 并缓动到目标。
+ * 0 = 正式：上电不上力，第一次 Open()/Close() 才启动 PWM；起始脉宽就是
+ *     张开位（见下面的 START_PULSE），第一帧不产生摆动。
  * 下面的标定分支代码保留，不删除。 */
 #ifndef SERVO_GRIPPER_CALIB_MODE
 #define SERVO_GRIPPER_CALIB_MODE        0
@@ -41,9 +42,10 @@
 #define SERVO_GRIPPER_DISABLE_OUTPUT    0
 #endif
 
-/* 正式值：2026-10-25 实测闭合临界 1400 us、张开临界 1750 us，各留 20 us 余量。 */
-#define SERVO_GRIPPER_CLOSE_PULSE_US  1420U
-#define SERVO_GRIPPER_OPEN_PULSE_US   1730U
+/* 正式值：2026-11-08 重标定，闭合临界 1700 us、张开临界 2050 us，
+ * 各留 20 us 余量。 */
+#define SERVO_GRIPPER_CLOSE_PULSE_US  1720U
+#define SERVO_GRIPPER_OPEN_PULSE_US   2030U
 /* 台架点动步长（KEY0 +、KEY1 -）；想要更高精度可临时改 10。 */
 #define SERVO_GRIPPER_STEP_US           50U
 
@@ -52,24 +54,38 @@
 #define SERVO_GRIPPER_MIN_PULSE_US    SERVO_GRIPPER_CALIB_MIN_US
 #define SERVO_GRIPPER_MAX_PULSE_US    SERVO_GRIPPER_CALIB_MAX_US
 #else
-/* 正式限幅：实测机械临界 1400~1750 us，按键最多到临界、不会越过。 */
-#define SERVO_GRIPPER_MIN_PULSE_US    1400U
-#define SERVO_GRIPPER_MAX_PULSE_US    1750U
+/* 正式限幅：实测机械临界 1700~2050 us，按键最多到临界、不会越过。 */
+#define SERVO_GRIPPER_MIN_PULSE_US    1700U
+#define SERVO_GRIPPER_MAX_PULSE_US    2050U
 #endif
 
-/* 软启动：START 是上电/首次启动的第一帧脉宽，取窗口中间，不落在两端；
- * Process() 每 SLEW_PERIOD_MS 走 SLEW_US，350 us 行程约 7 拍 = 140 ms，
- * 接近 BDS300 空载 0.13 s/60°，不会撞端点。
- * ！！SLEW_US 不要调到 10：全行程会变成 700 ms，超过状态机的
- *   SORT_GRIP_OPEN_MS / SORT_GRIP_CLOSE_MS（400 ms），夹爪没到位就动 Z 轴。 */
+/* 上电/首次启力的第一帧脉宽（Init 里也用它做起始软件脉宽）：
+ *   正式模式 = 张开位（OPEN）。停机时夹爪就停在张开位（TASK_DONE / READY /
+ *     回零都会 Open()），上电第一帧与实际位置一致，舵机不再“摆一下”。
+ *     以前固定写 1500 us：该值已不在 2026-11-08 标定的 1700~2050 窗口内，
+ *     第一帧会把夹爪先拽过闭合死点，再按 50 us / 20 ms 缓动回张开位，
+ *     表现就是上电时夹爪“合一下再张开”地抖一次。
+ *   标定模式 = 1500 us（800~2200 标定窗口中点），KEY0/KEY1 才能往两侧扫。
+ * ！！正式模式不要手填数字，跟随 SERVO_GRIPPER_OPEN_PULSE_US 一起改。 */
+#if SERVO_GRIPPER_CALIB_MODE
 #define SERVO_GRIPPER_START_PULSE_US  1500U
+#else
+#define SERVO_GRIPPER_START_PULSE_US  SERVO_GRIPPER_OPEN_PULSE_US
+#endif
+/* 缓动：Process() 每 SLEW_PERIOD_MS 走 SLEW_US，310 us 行程约 7 拍 = 140 ms，
+ * 接近 BDS300 空载 0.13 s/60°，不会撞端点。
+ * ！！SLEW_US 不要调到 10：全行程会变成 620 ms，超过状态机的
+ *   SORT_GRIP_OPEN_MS / SORT_GRIP_CLOSE_MS（400 ms），夹爪没到位就动 Z 轴。 */
 #define SERVO_GRIPPER_SLEW_US          50U
 #define SERVO_GRIPPER_SLEW_PERIOD_MS    20U
 
 /* 上电行为：
- *  1. Init() 只复位状态（脉宽 = START_PULSE），不写 CCR1、不启动 TIM1_CH1，
- *     并把 PA8 拉成推挽低电平（TIM1 未使能时 AF 引脚高阻，浮空会被噪声驱动）；
- *  2. 第一次 Open()/Close() 由 EnsurePwm() 切回 AF1 并启动 PWM；
+ *  1. Init() 只复位状态（脉宽 = START_PULSE，正式模式就是张开位），不写 CCR1、
+ *     不启动 TIM1_CH1，并把 PA8 拉成推挽低电平（TIM1 未使能时 AF 引脚高阻，
+ *     浮空会被噪声驱动）；
+ *  2. 第一次 Open()/Close() 由 EnsurePwm() 切回 AF1，并按“当前软件脉宽”启动
+ *     PWM：正式模式下当前脉宽 = 张开位 = 停机位置，所以第一帧不会让舵机
+ *     先合一下再张开（上电“摆一下”就是这么来的）；
  *  3. Process() 缓动到目标；JumpTo() 一次写到位，只给台架按键/标定用。
  * 标定过程见 SORTING_FLOW.md 第 8 节，换舵机或重装舵机臂后必须重新标定。 */
 void ServoGripper_Init(void);

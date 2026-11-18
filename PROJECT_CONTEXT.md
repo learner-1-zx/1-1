@@ -1,3 +1,7 @@
+> **AI 提示（2026-11-18）**：当前有效参数以 [`AI_CONTEXT.md`](AI_CONTEXT.md) 为准；
+> 本文是项目背景/历史资料，数值可能过时，AI 默认不要全文读取。
+
+
 # 智能分拣工程上下文
 
 ## 工程概况
@@ -81,10 +85,23 @@
   `R1200,3` 一键跑“X+转盘 → 开爪 → Z 下降 → 闭爪 → Z 上升 → 等转盘”、
   `RA` 中止。全部直接调用正式驱动，不经过状态机，不和队友的自动流程抢逻辑；
   序列运行期间 Protocol 对视觉任务回 BUSY；
+- 2026-11-05 增加**小写单词指令**（全流程手动测试）：上电自动发 `ok`，
+  发 `ok` 回 `ok`；`zup`/`zdown` 控 Z 工作高度、`ztop`/`zbottom` 到机械端点、
+  `xmax`/`xmin`/`ymax`/`ymin` 到软限位两端、`zero` 恢复零点（含故障复位）、
+  `zk`/`gb` 开合夹爪、`stop`/`reset`/`status`/`help`/`run`/`abort`；
+  也支持 `x1200`/`t3`/`z2000`/`g1650` 等小写数字指令。单词用回车/换行
+  或 100 ms 空闲结尾，和原有大写命令、虚拟按键共用同一个 USART3；
 - 接收中断由 `protocol.c` 的 `HAL_UART_RxCpltCallback` 分发到
   `BenchConsole_RxComplete()`，主循环 `BenchConsole_Process()` 解析，不在中断里做事；
 - USART2 仍是上位机/视觉协议，可用 `tools/pc/serial_tool.py` 直接发
   `status/home/stop/reset/mission`，不依赖视觉模块在线；
+- **2026-11-08 视觉坐标映射**：`SORT_VISION_COORD_MAP=1`，
+  `pick_x_step/pick_y_step` 字段改发视觉坐标（默认 mm，相对视觉零点）；
+  视觉零点对应机械 X2200/Y3000，900 微步 = 2 cm（45 微步/mm），
+  映射在 `SortingTask_MapVisionMission()` 里做；
+- **投放口固定为 X/Y 限位零点 0/0**：`SORT_DROP_X/Y_STEP=0`，
+  `SORT_XY_CALIB_MODE=0` 关闭“当前位置存投放口”的标记方法，
+  零点由回零时限位开关二次触发边沿建立；
 - 零代码备选：杜邦线把 PD0~PD3 短接到 GND 就等于按下对应键
   （按键上拉、低有效），但**绝不能碰 PD13 急停**；
 - 正式比赛把 `SORT_DEBUG_CONSOLE`、`SORT_DEBUG_UART`、`SORT_ENABLE_BENCH_KEYS`
@@ -105,7 +122,8 @@ ADC1 的初始化，并启动 Z 轴舵机、夹爪舵机和 ST7789V2 显示屏�
 `0 ~ SORT_X/Y_TRAVEL_STEPS`。
 **2026-11-05 起处于 XY 台架找限位模式**（`SORT_XY_BENCH_MODE=1`、
 `SORT_ENABLE_Y_AXIS=1`）：上电 X、Y **两轴同时**慢速回零（状态
-`SORT_XY_HOMING_BOTH`），不找 T，完成后直接 READY；
+`SORT_XY_HOMING_BOTH`），T 轴在 `SORT_XY_BENCH_KEEP_TURRET=1` 时**同时**启动
+三段回零，等三轴全部完成才进 READY；
 四个按键改为 XY 控制 **KEY0 → X 到零点 0、KEY1 → X 到行程上限 5400、
 KEY2 → Y 到零点 0、KEY3 → Y 到行程上限 6800**（`SORT_XY_BENCH_KEY_GOTO_END=1`
 一键到底，800 步/秒 ≈10 mm/s；按住不连发；移动中按反方向键可立刻反向）。
@@ -132,21 +150,20 @@ KEY0 **按下即张开夹爪，按住满 `SORT_DROP_KEY_LONG_PRESS_MS`（1000 ms
 把数值写回宏即可掉电保持（`SORT_DEBUG_UART` 控制调试输出）。
 **2026-10-25 起夹爪恢复正式模式**（`SERVO_GRIPPER_CALIB_MODE=0`、
 `SORT_BENCH_KEY_JUMP=1`）：上电不启动 PWM、不上力，进入主循环后由
-`SORT_SYS_INIT` 调 `ServoGripper_Open()` 张开一次，不会先摆到 1500 us 中间位；
-KEY0/KEY1 一次到位到 1730/1420 us。
+`SORT_SYS_INIT` 调 `ServoGripper_Open()` 张开一次。2026-11-08 重标后
+张开/闭合为 2030/1720 us（限幅 1700~2050 us），且正式模式的起始脉宽
+就是张开位（2030 us），所以上电第一帧与停机位置一致，**夹爪不再摆一下**。
+KEY0/KEY1 一次到位到 2030/1720 us。
 需要重新标定夹爪时改成 `CALIB_MODE=1` + `JUMP=0`：上电即输出 `START_PULSE`
 （1500 us）零点并保持，`Open()/Close()` 只改标志不动脉宽，限幅放宽到
 800~2200 us，KEY0/KEY1 每次 ±50 us 点动（步骤见 SORTING_FLOW.md 8.12）；
 标定完必须把 `SERVO_GRIPPER_CALIB_MODE` 改回 0，否则自动流程不会动夹爪。
-**2026-10-27 Z 轴齿条标定完成**：实测机械行程 **最上面 1200 us、
-最下面 2500 us**（行程 1300 us），限幅 1200~2500 us。
-当前 `ZSERVO_CALIB_MODE=1`（台架手动）：上电停在 1850 us（行程中点），
-`Travel()/Approach()/Grasp()` 不改脉宽（视觉未就绪、不跑全流程）；
-KEY2/KEY3 控 Z：KEY2 一键到 2500、KEY3 一键到 1200（`SORT_BENCH_KEY_Z_SERVO=1`、
-`ZSERVO_BENCH_KEY2/3_JUMP=1`），每次打印 `Z_PULSE=`。
-正式工作高度占位 1220/1850/2480 us（两端各留 20 us，GRASP/APPROACH 仍需按物块微调）。
-视觉联调通过、要跑自动流程时把 `ZSERVO_CALIB_MODE` 改 0：
-上电到运输位 1220 us，`Travel/Approach/Grasp` 正常控制。
+**2026-11-08 Z 轴重新定义**：最低工作位 **2150 us**，最上面 1200 us；
+不再使用 1850 us 的中间高度。`ZSERVO_CALIB_MODE=0`（正式）：上电直接到
+**ztop=1200 us**，`Travel/Approach/Grasp = 1200/1200/2150 us`；限幅 1200~2150。
+KEY2 一键到 2150、KEY3 一键到 1200（`SORT_BENCH_KEY_Z_SERVO=1`、
+`ZSERVO_BENCH_KEY2/3_JUMP=1`）。台架逐档标定仍可把 `ZSERVO_CALIB_MODE` 改 1，
+上电停在 `ZSERVO_CALIB_START_US=1200`。
 调 X 轴时把 `SORT_BENCH_KEY_Z_SERVO` 置 0、`SORT_BENCH_KEY_X_JOG` 置 1。
 T 轴/X 轴台架测试和夹爪上电自检已删除。
 
@@ -160,27 +177,27 @@ XY 取料 -> Z 接近 -> 开爪 -> Z 下降 -> 闭爪 -> Z 抬升并并行转 T
 
 - Z 轴舵机：**PA1 / TIM2_CH2**，驱动在 `Drivers/servo_z.c`
   （TIM2：Prescaler 83、Period 19999，APB1 定时器时钟 84 MHz，
-  50 Hz、1 us 分辨率，比较值即脉宽微秒数；2026-10-27 实测机械行程
-  **最上面 1200 us、最下面 2500 us**（行程 1300 us），限幅 1200～2500 us；
-  工作高度占位 运输/接近/抓取 = 1220/1850/2480 us；
-  `ZSERVO_CALIB_MODE=1`（当前台架手动）上电 1850 us，
-  `Travel()/Approach()/Grasp()` 不改脉宽；KEY2/KEY3 一键到 2500/1200
+  50 Hz、1 us 分辨率，比较值即脉宽微秒数；2026-11-08 标定：
+  **最上面 1200 us、最低工作位 2150 us**，限幅 1200～2150 us；
+  工作高度 `Travel/Approach/Grasp = 1200/1200/2150 us`（不再有 1850 中间位）；
+  `ZSERVO_CALIB_MODE=0`（当前正式）上电直接到 1200 us（ztop），
+  `Travel()/Approach()/Grasp()` 正常写脉宽；KEY2 一键到 2150、KEY3 一键到 1200
   （`SORT_BENCH_KEY_Z_SERVO=1`、`ZSERVO_BENCH_KEY2/3_JUMP=1`）。
-  改成 0 则上电到运输位 1220 us、自动流程控制 Z。
   PA1 的板载 LED 已拆除，换板时必须重新确认）
   PA1 的板载 LED 已拆除，换板时必须重新确认）
   PA1 的板载 LED 已拆除，换板时必须重新确认）
   PA1 的板载 LED 已拆除，换板时必须重新确认）
 - 夹爪舵机：**PA8 / TIM1_CH1 硬件 PWM**，驱动在 `Drivers/servo_gripper.c`
   （TIM1 为 50 Hz、1 us 分辨率，脉宽直接写 CCR1；上电不启动 PWM、舵机不上力，
-  软件脉宽复位到安全中位 1500 us，第一次 `Open()`/`Close()` 先以 1500 us 启动
-  PWM，再由 `ServoGripper_Process()` 按 50 us / 20 ms 缓动到 1730/1420 us
+  软件脉宽复位到 `START_PULSE`——正式模式等于张开位 2030 us，第一次 `Open()`
+  就以该脉宽启动 PWM，第一帧与停机位置一致，上电不摆动；
+  之后 `ServoGripper_Process()` 按 50 us / 20 ms 缓动到 1720/2030 us
   （约 140 ms），避免一帧跳完 310 us 撞进端点导致堵转；
   上电待机期间 PA8 被拉成推挽低电平（定时器 `MOE=0` 时 AF 引脚是高阻，
   浮空会被噪声触发抖动，且毛刺不受软件限幅），第一次输出脉宽前才切回
   `GPIO_AF1_TIM1`；最终选型 **BDS300**：7.4 V、10 kg·cm、
-  0.13 s/60°；2026-10-25 重装舵机臂后重新实测闭合临界 1400 us、张开临界 1750 us，
-  正式值 1420/1730 us，限幅 1400～1750 us；
+  0.13 s/60°；2026-11-08 重新实测闭合临界 1700 us、张开临界 2050 us，
+  正式值 1720/2030 us，限幅 1700～2050 us；
   齿条行程按 20 齿、模数 0.8 齿轮计算：3.5 个齿距 ≈ 8.8 mm = 63°；
   实测两端死点间距 350 us 只代表“舵机臂装角 + 机械死点”的位置差，
   舵机在死点处顶住后多给的脉宽并不产生位移，所以不要再按理论角度换算脉宽）

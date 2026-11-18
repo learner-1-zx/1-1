@@ -9,7 +9,13 @@
       i32 pick_y_step | i32 drop_step | u8 state
 应答：0x80 ACK / 0x81 BUSY / 0x82 DONE / 0x83 ERROR(task_id+error)。
 
-说明文档：VISION_PROTOCOL.md（像素→微步标定、重试策略、联调顺序）。
+2026-11-08 起，固件默认 SORT_VISION_COORD_MAP=1：
+  pick_x_step / pick_y_step 字段填 **视觉坐标（默认 mm，相对视觉零点）**，
+  由 STM32 转换成机械微步；不要再在这里换算成绝对微步。
+  视觉零点 = 机械 X2200 / Y3000；900 微步 = 2 cm。
+  如果固件改成 SORT_VISION_COORD_MAP=0，才使用下面的 pixel_to_step_x()。
+
+说明文档：VISION_PROTOCOL.md（坐标映射、重试策略、联调顺序）。
 把本文件拷到 OpenART 的 U 盘，按需改 CLASS_TO_BOX / 标定常量即可。
 """
 
@@ -23,7 +29,7 @@ PROTO_VER   = 1
 CMD_MISSION = 0x10
 EV_ACK, EV_BUSY, EV_DONE, EV_ERROR = 0x80, 0x81, 0x82, 0x83
 
-PICK_X_MIN, PICK_X_MAX = 0, 20000        # 与 SORT_X_MIN/MAX_STEP 保持一致
+PICK_X_MIN, PICK_X_MAX = -1000, 1000        # 视觉坐标 mm（相对视觉零点）
 
 _rx = b""                                 # 接收缓存：可能只读到半帧
 
@@ -129,6 +135,8 @@ CLASS_TO_BOX = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}   # 按比赛规则填
 
 
 def pixel_to_step_x(u, v):
+    """旧方案：SORT_VISION_COORD_MAP=0 时把像素换算成绝对微步。
+    默认映射开启时不要用它，直接发 mm 视觉坐标。"""
     return int(A_COEF * u + B_COEF * v + C_COEF) + CAMERA_TO_GRIPPER_STEPS
 
 
@@ -141,7 +149,7 @@ def demo():
     task_id = 0
     while True:
         task_id = (task_id + 1) & 0xFFFF
-        result = send_and_wait(task_id, 2, 3, 1200, 0)
+        result = send_and_wait(task_id, 2, 3, 0, 0)
         print("demo task", task_id, "->", result)
         time.sleep_ms(2000)
 
@@ -156,12 +164,15 @@ def run(find_blocks):
             continue
 
         b = blocks[0]
-        x_step = pixel_to_step_x(b.cx(), b.cy())
+        # 默认 SORT_VISION_COORD_MAP=1：这里应填“像素→视觉 mm”的结果，
+        # 例如 x_coord = pixel_to_vision_mm(b.cx(), b.cy())。
+        # 下面 pixel_to_step_x() 只在固件关闭映射（发绝对微步）时使用。
+        x_coord = pixel_to_step_x(b.cx(), b.cy())
         box_id = CLASS_TO_BOX.get(b.code(), 1)
         task_id = (task_id + 1) & 0xFFFF
 
-        result = send_and_wait(task_id, b.code(), box_id, x_step, 0)
-        print("task", task_id, "x", x_step, "box", box_id, "->", result)
+        result = send_and_wait(task_id, b.code(), box_id, x_coord, 0)
+        print("task", task_id, "x", x_coord, "box", box_id, "->", result)
         time.sleep_ms(300)
 
 

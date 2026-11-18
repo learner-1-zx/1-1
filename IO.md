@@ -1,3 +1,7 @@
+> **AI 提示（2026-11-18）**：当前有效参数以 [`AI_CONTEXT.md`](AI_CONTEXT.md) 为准；
+> 本文包含历史/标定过程，数值可能过时，AI 默认不要全文读取。
+
+
 # IO 引脚分配
 
 > 适用工程：`diankong` / STM32F407VET6（LQFP100）
@@ -25,9 +29,9 @@
 > X/Y 零点开关（2026-10-26 接入）：**X = PD6（`X_HOME`）、Y = PD5（`Y_HOME`）**，
 > 普通机械限位开关 NO 接 IO、C 接 GND，内部上拉、低电平触发。
 > 2026-11-05 起 `SORT_ENABLE_Y_AXIS = 1`，并处于台架找限位模式
-> （`SORT_XY_BENCH_MODE = 1`）：上电 X、Y **两轴同时**慢速回零、不找 T，
-> 回零后 KEY0~KEY3 = X-/X+/Y-/Y+ 点动。正式流程
-> （`SORT_XY_BENCH_MODE = 0`）仍按 X → Y → T 顺序回零。
+> （`SORT_XY_BENCH_MODE = 1`）：上电 X、Y 两轴同时慢速回零，T 轴也**同时**启动
+> 回零（`SORT_XY_BENCH_KEEP_TURRET=1`）；四键仍为 X-/X+/Y-/Y+ 点动。
+> 正式流程（`SORT_XY_BENCH_MODE = 0`）仍按 X → Y → T 顺序回零。
 
 ## 2. 功能分配
 
@@ -41,12 +45,12 @@
 | PA7 | `Y_STEP` | 推挽输出，高速 | 空闲低；高电平为步进脉冲 | Y 轴步进脉冲 | TIM6 20 kHz 软件节拍 |
 | PC1 | `Y_DIR` | 推挽输出，高速 | 初始低；SET 为正方向 | Y 轴方向 | `dir_invert = 1U`（2026-11-05 实测方向相反） |
 | PC4 | `Y_EN` | 推挽输出，高速 | 空闲高=禁用；低=使能 | Y 轴使能 | 代码按低有效处理 |
-| PB6 | `T_STEP` | 推挽输出，高速 | 空闲高；低电平为步进脉冲 | T 轴步进脉冲 | T 轴按低有效脉冲配置 |
-| PC2 | `T_DIR` | 推挽输出，高速 | 初始低；SET 为正方向 | T 轴方向 | 以驱动器实际接线为准 |
-| PC5 | `T_EN` | 推挽输出，高速 | 空闲高=禁用；低=使能 | T 轴使能 | 代码按低有效处理 |
+| PB6 | `T_STEP` | 推挽输出，高速 | 空闲低；高电平为步进脉冲 | T 轴步进脉冲 | 经 ULN2003 反相，`step_active_low=0`（与 X/Y 同） |
+| PC2 | `T_DIR` | 推挽输出，高速 | 初始低；SET 为正方向 | T 轴方向 | 经 ULN2003 反相；方向反了改 `dir_invert` |
+| PC5 | `T_EN` | 推挽输出，高速 | 空闲高=脱机；低=正常运转（使能） | T 轴 TB6600 脱机控制 | 经 ULN2003 反相，`en_active_low=1`（MCU 低有效使能） |
 
-> 当前 `stepper_motor.c` 中 X/Y 的 `step_active_low = 0`，T 的 `step_active_low = 1`。
-> 因此 X/Y 是“高脉冲”，T 是“低脉冲”，接线和示波器测量时不要混淆。
+> 当前 `stepper_motor.c` 中 X/Y/T 三轴的 `step_active_low` 都是 **0**，
+> 即 MCU 引脚都是“高脉冲”。T 轴经 ULN2003 反相后才变成 TB6600 的低有效光耦脉冲。
 
 #### A4988 相线接法（X/Y 轴，2026-10-26 补充）
 
@@ -82,7 +86,7 @@ TB6600（T 轴）已经按 `A+/A-/B+/B-` 标好相，按名字接即可。
 
 | 引脚 | 宏/网络名 | 模式 | 输出参数 | 功能 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| PA1 | `Z_SERVO_PWM` | AF 推挽 / `GPIO_AF1_TIM2` | 50 Hz，限幅 **1200～2500 us**（实测：1200 最上、2500 最下）；工作高度 1220/1850/2480 us（待按物块标定）。`ZSERVO_CALIB_MODE=1`（当前台架手动）：上电 1850 us、KEY2 一键到 2500、KEY3 一键到 1200；改成 0 则上电到运输位 1220、由自动流程控制 | Z 轴舵机 | TIM2_CH2 硬件 PWM |
+| PA1 | `Z_SERVO_PWM` | AF 推挽 / `GPIO_AF1_TIM2` | 50 Hz，限幅 **1200～2150 us**（2026-11-08：1200 最上、2150 最低工作位）；工作高度 1200/1200/2150 us。`ZSERVO_CALIB_MODE=0`（当前正式）：上电即 ztop=1200、KEY2 一键到 2150、KEY3 一键到 1200；无 zmid | Z 轴舵机 | TIM2_CH2 硬件 PWM |
 | PA8 | `SERVO_PWM` | AF1 推挽输出 | 50 Hz，闭 1420 us / 开 1730 us，限幅 1400～1750 us；上电先以 1500 us 安全中位启动 PWM，再按 50 us/20 ms 缓动 | 夹爪舵机 | TIM1_CH1 硬件 PWM |
 
 PA8 硬件 PWM 的实现方式：
@@ -109,16 +113,13 @@ PA8 硬件 PWM 的实现方式：
    有效 PWM 但顶在机构到不了的位置（不是信号断了）。先按 KEY1 往闭合方向
    退回，再按 `SORTING_FLOW.md` 8.3 重新标定；软启动（1500 us 安全中位起力 +
    50 us/20 ms 缓动）与排查步骤见 `SORTING_FLOW.md` 8.10。
-8. **Z 轴台架模式（2026-10-27 标定完成）**：实测行程 **最上面 1200 us、
-   最下面 2500 us**（行程 1300 us），限幅同值。
-   当前 `ZSERVO_CALIB_MODE = 1`（台架手动）：上电停在 1850 us（行程中点），
-   `Travel/Approach/Grasp` 不改脉宽（视觉未就绪、不跑全流程），
-   **KEY2 一键到最下 2500 us、KEY3 一键到最上 1200 us**，每次打印 `Z_PULSE=`。
-   `SORT_BENCH_KEY_Z_SERVO=1` 决定 KEY2/KEY3 控 Z；调 X 轴时把它置 0、
-   `SORT_BENCH_KEY_X_JOG` 置 1。
-   视觉联调通过、要跑自动流程时把 `ZSERVO_CALIB_MODE` 改 0：
-   上电到运输位 1220 us，`Travel/Approach/Grasp` 正常控制。
-   步骤见 `SORTING_FLOW.md` 8.14。
+8. **Z 轴（2026-11-08 重新标定）**：最上面 **1200 us**、最低工作位 **2150 us**，
+   限幅 1200～2150 us；工作高度 `Travel/Approach/Grasp = 1200/1200/2150 us`。
+   当前 `ZSERVO_CALIB_MODE = 0`（正式）：上电直接 ztop=1200 us，
+   `Travel/Approach/Grasp` 正常写脉宽；不再使用 1850 us 的 zmid。
+   KEY2 一键到 2150、KEY3 一键到 1200（`SORT_BENCH_KEY_Z_SERVO=1`、
+   `ZSERVO_BENCH_KEY2/3_JUMP=1`）。台架标定可临时把 `ZSERVO_CALIB_MODE` 改 1，
+   上电停在 `ZSERVO_CALIB_START_US=1200`。
 8. PA8 待机态不是浮空：`MX_TIM1_Init()` 之后 TIM1 的 `MOE=0`、`OSSI=0`，
    引脚是高阻（Hi-Z），要到第一次 `HAL_TIM_PWM_Start()` 才有输出。
    `ServoGripper_Init()` 现在把 PA8 配成推挽输出低电平（内部下拉），
@@ -217,7 +218,8 @@ PD12 配置为内部上拉输入，因此：
 5. X 完成后再回 Y，最后回 T（PD12 霍尔）。
 
 台架模式（`SORT_XY_BENCH_MODE = 1`，当前）：X、Y **同时**走上面 1~3 三段，
-各自独立推进，任一轴失败整体报 `SORT_ERR_HOMING`；完成后直接 READY（不找 T）。
+`SORT_XY_BENCH_KEEP_TURRET=1` 时 T 轴也在同一时刻启动自己的回零；
+任一轴失败整体报 `SORT_ERR_HOMING`，X/Y 与 T 全部完成才进 READY。
 软限位由 `SORT_XY_BENCH_WIDE_LIMIT` 决定：0（当前）= 按实测行程限位，
 1 = ±`SORT_XY_BENCH_POS_LIMIT`（仅首次找行程）。详见 `SORTING_FLOW.md` 8.13.6。
 
@@ -278,7 +280,7 @@ PD12 配置为内部上拉输入，因此：
 > 继续按住不会重复打印。X 未回零/正在运动时打印 `DROP_X=REJECT`。
 > 标定值同时立即用于本次运行的自动流程（只在 RAM，复位后回到宏里的值）。
 > 动作在**按下沿**触发。夹爪标定（`SORT_BENCH_KEY_JUMP=0`）下 KEY1
-> 按住不放会每 `SORT_BENCH_KEY_REPEAT_MS`（150 ms）再走一步，松手即停，
+> 按住不放会每 `SORT_BENCH_KEY_REPEAT_MS`（150 ms）再走一步，松手即停，上
 > 方便一口气走完 350 us 行程；投放口标定（`SORT_XY_CALIB_MODE=1`）下 KEY0
 > 不连发（要留给长按计时），按住 1 s 只保存一次；
 > Z 轴标定下 KEY3 逐档（`ZSERVO_BENCH_KEY3_JUMP=0`，当前）按住连发，

@@ -457,6 +457,37 @@ static void BenchXY_Jog(uint8_t key_index)
 }
 #endif /* SORT_XY_BENCH_MODE */
 
+#if SORT_T_BENCH_KEY_DIAGNOSTIC
+/* T 轴排查按键：先停止自动回零，再用固定步数单方向点动。
+ * 位置尚未回零时只用于验证 STEP/DIR/EN 和电机方向，不建立绝对坐标。 */
+static void BenchT_Jog(int8_t direction)
+{
+  SortingState_t current_state = SortingTask_GetState();
+  int32_t target;
+
+  if ((current_state == SORT_SYS_HOMING) ||
+      (current_state == SORT_XY_HOMING_BOTH) ||
+      (current_state == SORT_XY_HOMING_SEARCH) ||
+      (current_state == SORT_XY_HOMING_BACKOFF) ||
+      (current_state == SORT_XY_HOMING_APPROACH))
+  {
+    SortingTask_Stop();
+  }
+
+  if (StepperMotor_IsBusy(STEPPER_T) != 0U)
+  {
+    return;
+  }
+
+  target = StepperMotor_GetPosition(STEPPER_T) +
+           ((direction > 0) ? (int32_t)SORT_T_BENCH_KEY_STEPS
+                            : -(int32_t)SORT_T_BENCH_KEY_STEPS);
+  StepperMotor_SetSpeed(STEPPER_T, SORT_T_BENCH_KEY_SPEED_STEPS_S);
+  StepperMotor_SetAcceleration(STEPPER_T, SORT_T_BENCH_KEY_SPEED_STEPS_S);
+  (void)StepperMotor_MoveTo(STEPPER_T, target);
+}
+#endif
+
 static void BenchKey_Process(void)
 {
   static GPIO_PinState stable[4] = {
@@ -625,6 +656,23 @@ static void BenchKey_Process(void)
 #if SORT_XY_BENCH_MODE
       /* XY 找限位台架：四个键全部给 XY 点动。
        * 夹爪/Z 轴的按键语义整段跳过（continue），互不干扰。 */
+#if SORT_T_BENCH_KEY_DIAGNOSTIC
+      if (i == 0U)
+      {
+        SortingTask_Stop();
+        continue;
+      }
+      if (i == 1U)
+      {
+        BenchT_Jog(+1);
+        continue;
+      }
+      if (i == 2U)
+      {
+        BenchT_Jog(-1);
+        continue;
+      }
+#endif
       BenchXY_Jog(i);
       continue;
 #endif
@@ -676,7 +724,7 @@ static void BenchKey_Process(void)
 #endif
       /* KEY2/KEY3：
        *   SORT_BENCH_KEY_Z_SERVO=1（当前）：控 Z 轴
-       *     ZSERVO_BENCH_KEY2/3_JUMP=1（当前）：KEY2 一键到最下 2500 us、
+       *     ZSERVO_BENCH_KEY2/3_JUMP=1（当前）：KEY2 一键到最低工作位 2150 us、
        *       KEY3 一键到最上 1200 us，按下沿一次、不连发；
        *     = 0 时每次 ±ZSERVO_STEP_US（50 us），按住连发；
        *   每次动作都从 USART3 打印 Z_PULSE=。

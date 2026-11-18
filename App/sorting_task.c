@@ -70,6 +70,15 @@ typedef struct
 /* [0] = X，[1] = Y。SORT_ENABLE_Y_AXIS=0 时 [1] 直接置 DONE。 */
 static XYHomeCtx_t xy_home[2];
 
+#if SORT_XY_BENCH_KEEP_TURRET
+/* 2026-11-08：台架模式下 X/Y 和 T **同时**回零。
+ * xy_home_done / t_home_done 用来判断哪一路先完成：
+ *   - T 先完成：进 SORT_XY_HOMING_BOTH 等 X/Y，完成后 READY；
+ *   - X/Y 先完成：T 继续走自己的三段，完成后 READY。 */
+static uint8_t xy_home_done;
+static uint8_t t_home_done;
+#endif
+
 /* 两轴同时回零的推进结果。 */
 #define XY_HOME_RUNNING   0U
 #define XY_HOME_COMPLETE  1U
@@ -506,6 +515,31 @@ static uint8_t SortingTask_ProcessXYBothHoming(void)
 #endif
   return XY_HOME_RUNNING;
 }
+
+#if SORT_XY_BENCH_KEEP_TURRET
+/* T 回零与 X/Y 并行时，在 T 的每个阶段开头推进一次 X/Y。
+ * 返回 0 表示 X/Y 已经失败（SortingTask_Fail 已把 state 切到 ERROR），
+ * 调用方直接 break 离开当前 T 分支即可。 */
+static uint8_t SortingTask_PollXYDuringTurretHoming(void)
+{
+  uint8_t result;
+
+  if (xy_home_done != 0U)
+  {
+    return 1U;
+  }
+  result = SortingTask_ProcessXYBothHoming();
+  if (result == XY_HOME_ERROR)
+  {
+    return 0U;
+  }
+  if (result == XY_HOME_COMPLETE)
+  {
+    xy_home_done = 1U;
+  }
+  return 1U;
+}
+#endif
 #endif /* SORT_XY_BENCH_MODE */
 
 #if SORT_DEBUG_UART
@@ -549,6 +583,12 @@ static void SortingTask_StartTurretHoming(void)
     SortingTask_Fail(SORT_ERR_HOMING);
     return;
   }
+#if SORT_DEBUG_UART
+  /* 台架串口确认 T 回零确实启动了；否则只看到 XY_HOME OK 会误以为卡住。
+   * T_HOME_PIN：1 = 高（没有磁铁/未压到），0 = 低（霍尔已触发）。 */
+  DebugUart_Write("T_HOME START\r\n");
+  DebugUart_WriteInt("T_HOME_PIN=", (HallSensor_IsTriggered() != 0U) ? 0 : 1);
+#endif
   ZServo_Travel();
   ServoGripper_Open();
   SortingTask_Enter(SORT_T_HOMING_SEARCH);
@@ -754,6 +794,11 @@ void SortingTask_Init(void)
   drop_x_step = SORT_DROP_X_STEP;
   drop_y_step = SORT_DROP_Y_STEP;
 
+#if SORT_XY_BENCH_MODE && SORT_XY_BENCH_KEEP_TURRET
+  xy_home_done = 0U;
+  t_home_done = 0U;
+#endif
+
   /* X/Y 回零参数先指向 X；每次 StartAxisHoming 会重新赋值。 */
   homing_axis = STEPPER_X;
   homing_home = AXIS_HOME_X;
@@ -761,6 +806,62 @@ void SortingTask_Init(void)
   AxisHome_ResetDebounce();
 
   SortingTask_ApplyMotionConfig();
+}
+
+#if SORT_VISION_COORD_MAP
+/* 视觉坐标 → 机械绝对微步：
+ *   step = zero + sign * coord * NUM / DEN
+ * 视觉零点 X=2200/Y=3000，900 微步 = 2 cm（默认按 mm，NUM=45/DEN=1）。 */
+static int32_t SortingTask_VisionCoordToStep(int32_t coord, int32_t zero,
+                                             int32_t sign)
+{
+  int64_t delta;
+  int64_t step;
+
+  delta = (int64_t)coord * (int64_t)SORT_VISION_STEPS_PER_COORD_NUM;
+  delta /= (int64_t)SORT_VISION_STEPS_PER_COORD_DEN;
+  if (sign < 0)
+  {
+    delta = -delta;
+  }
+  step = (int64_t)zero + delta;
+  if (step > (int64_t)INT32_MAX)
+  {
+    step = (int64_t)INT32_MAX;
+  }
+  else if (step < (int64_t)INT32_MIN)
+  {
+    step = (int64_t)INT32_MIN;
+  }
+  return (int32_t)step;
+}
+#endif
+
+void SortingTask_MapVisionMission(SortMission_t *mission)
+{
+  if (mission == 0)
+  {
+    return;
+  }
+
+#if SORT_VISION_COORD_MAP
+  {
+    int32_t vision_x = mission->pick_x_step;
+    int32_t vision_y = mission->pick_y_step;
+
+    mission->pick_x_step = SortingTask_VisionCoordToStep(
+        vision_x, SORT_VISION_ZERO_X_STEP, SORT_VISION_X_SIGN);
+    mission->pick_y_step = SortingTask_VisionCoordToStep(
+        vision_y, SORT_VISION_ZERO_Y_STEP, SORT_VISION_Y_SIGN);
+
+#if SORT_DEBUG_UART
+    DebugUart_WriteInt("VISION_X=", vision_x);
+    DebugUart_WriteInt("VISION_Y=", vision_y);
+    DebugUart_WriteInt("MAP_X_STEP=", mission->pick_x_step);
+    DebugUart_WriteInt("MAP_Y_STEP=", mission->pick_y_step);
+#endif
+  }
+#endif
 }
 
 uint8_t SortingTask_Submit(const SortMission_t *mission)
@@ -977,7 +1078,16 @@ void SortingTask_Process(void)
         SortingTask_Fail(SORT_ERR_HOMING);
         break;
       }
+#if SORT_XY_BENCH_KEEP_TURRET
+      /* X/Y 的 Jog 已经同时启动；这里立刻再启动 T 的 Jog。
+       * state 切到 T_HOMING_SEARCH，但 X/Y 两轴仍由 TIM6 独立推进，
+       * 每个 T 回零分支开头会继续调用 ProcessXYBothHoming()。 */
+      xy_home_done = 0U;
+      t_home_done = 0U;
+      SortingTask_StartTurretHoming();
+#else
       SortingTask_Enter(SORT_XY_HOMING_BOTH);
+#endif
       break;
 #else
       /* 2026-10-26 起 X/Y 有真实零点开关（X=PD6、Y=PD5），
@@ -1114,8 +1224,22 @@ void SortingTask_Process(void)
       {
         case XY_HOME_COMPLETE:
 #if SORT_XY_BENCH_KEEP_TURRET
-          /* 需要连 T 一起回零时走原来的 T 流程。 */
-          SortingTask_StartTurretHoming();
+          xy_home_done = 1U;
+          if (t_home_done == 0U)
+          {
+            /* 兼容旧路径：如果 X/Y 完成时 T 还没启动，这里补启动 T。
+             * 并行路径下 T 已经在跑，不会走到这里。 */
+            SortingTask_StartTurretHoming();
+            break;
+          }
+          /* X/Y 和 T 都已完成。 */
+          SortingTask_ApplyXYMotionConfig();
+          SortingTask_Enter(SORT_SYS_READY);
+          Protocol_SendStatus((uint8_t)SORT_SYS_READY,
+                              (uint8_t)SORT_ERR_NONE);
+#if SORT_DEBUG_UART
+          DebugUart_Write("XY+T HOME OK -> READY\r\n");
+#endif
 #else
           /* 台架只调 XY：两轴 0 点建好后直接 READY。
            * T 轴位置仍然无效，视觉任务会被 Submit 拒绝，避免误动转盘。 */
@@ -1141,6 +1265,12 @@ void SortingTask_Process(void)
 #endif
 
     case SORT_T_HOMING_SEARCH:
+#if SORT_XY_BENCH_MODE && SORT_XY_BENCH_KEEP_TURRET
+      if (SortingTask_PollXYDuringTurretHoming() == 0U)
+      {
+        break;
+      }
+#endif
       if (SortingTask_THomeDebounced() != 0U)
       {
         StepperMotor_Stop(STEPPER_T);
@@ -1170,6 +1300,12 @@ void SortingTask_Process(void)
       break;
 
     case SORT_T_HOMING_BACKOFF:
+#if SORT_XY_BENCH_MODE && SORT_XY_BENCH_KEEP_TURRET
+      if (SortingTask_PollXYDuringTurretHoming() == 0U)
+      {
+        break;
+      }
+#endif
       if (SortingTask_THomeReleasedDebounced() != 0U)
       {
         /* 已完全退出磁铁，再按回零方向慢速接近；这次触发点
@@ -1199,6 +1335,12 @@ void SortingTask_Process(void)
       break;
 
     case SORT_T_HOMING_APPROACH:
+#if SORT_XY_BENCH_MODE && SORT_XY_BENCH_KEEP_TURRET
+      if (SortingTask_PollXYDuringTurretHoming() == 0U)
+      {
+        break;
+      }
+#endif
       if (SortingTask_THomeDebounced() != 0U)
       {
         StepperMotor_Stop(STEPPER_T);
@@ -1208,10 +1350,27 @@ void SortingTask_Process(void)
         StepperMotor_SetAcceleration(STEPPER_T, SORT_T_ACCEL_STEPS_S2);
         ZServo_Travel();
         ServoGripper_Open();
+#if SORT_XY_BENCH_MODE && SORT_XY_BENCH_KEEP_TURRET
+        /* T 比 X/Y 先到零点：转到 SORT_XY_HOMING_BOTH 等 X/Y 完成。
+         * 该状态的 COMPLETE 分支看到 t_home_done=1 后直接进 READY，
+         * 不会再次启动 T 回零。 */
+        t_home_done = 1U;
+        if (xy_home_done == 0U)
+        {
+#if SORT_DEBUG_UART
+          DebugUart_Write("T_HOME OK, WAIT XY\r\n");
+#endif
+          SortingTask_Enter(SORT_XY_HOMING_BOTH);
+          break;
+        }
+#endif
         SortingTask_Enter(SORT_SYS_READY);
         /* 回零完成主动上报一次，视觉侧不必轮询。 */
         Protocol_SendStatus((uint8_t)SORT_SYS_READY,
                             (uint8_t)SORT_ERR_NONE);
+#if SORT_DEBUG_UART
+        DebugUart_Write("T_HOME OK -> READY\r\n");
+#endif
       }
       else if (SortingTask_Elapsed(SORT_T_HOME_TIMEOUT_MS) != 0U)
       {

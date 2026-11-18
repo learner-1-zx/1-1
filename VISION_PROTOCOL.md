@@ -1,3 +1,7 @@
+> **AI 提示（2026-11-18）**：当前有效参数以 [`AI_CONTEXT.md`](AI_CONTEXT.md) 为准；
+> 本文是视觉协议专项说明，按需读取。
+
+
 # 视觉坐标上传协议（OpenART mini → STM32F407）
 
 > 设备：逐飞 **OpenART mini**（NXP 主控，MicroPython），实物见
@@ -6,8 +10,10 @@
 > **一句话结论**：视觉模块用 UART2 排针接到 STM32 的 **USART2（PA2/PA3）**，
 > 按版本 1 的二进制帧发一条 **17 字节任务载荷**（里面放 `pick_x_step` /
 > `pick_y_step` / `box_id`），STM32 回 `ACK`，动作完成后回 `DONE`。
-> 坐标必须是 **相对 X 回零零点的绝对微步**，不是像素、也不是 mm
-> （mm 换算在视觉端做，见第 5 节）。
+> 2026-11-08 起，`pick_x_step` / `pick_y_step` 字段承载的是**视觉坐标**
+> （默认单位 mm，相对视觉零点），STM32 用 `SORT_VISION_*` 转成机械微步；
+> 详见第 4.3 节和第 5 节。只有 `SORT_VISION_COORD_MAP=0` 时才要求视觉端
+> 自己换算成绝对微步。
 
 ---
 
@@ -79,8 +85,8 @@ AA 55 | version=0x01 | command | length | payload(length 字节) | CRC16(低字�
 | 0 | u16 | `task_id` | 任务号，视觉自增，原样回传，便于匹配 |
 | 2 | u8 | `class_id` | 物块类别（视觉模型输出，STM32 只透传） |
 | 3 | u8 | `box_id` | 目标仓 **1..6**（`SORT_BOX_ID_ONE_BASED=1`） |
-| 4 | i32 | `pick_x_step` | 取料点 X **绝对微步**（相对 X 回零零点） |
-| 8 | i32 | `pick_y_step` | 取料点 Y 绝对微步（`SORT_ENABLE_Y_AXIS=0` 时被忽略） |
+| 4 | i32 | `pick_x_step` | 取料点 X **视觉坐标**（默认 mm，相对视觉零点；映射见 4.3） |
+| 8 | i32 | `pick_y_step` | 取料点 Y 视觉坐标（`SORT_ENABLE_Y_AXIS=0` 时被忽略） |
 | 12 | i32 | `drop_step` | 备用投放步数；`box_id` 合法时不用，填 0 |
 | 16 | u8 | `state` | 任务状态标记，填 1 |
 
@@ -109,11 +115,12 @@ AA 55 | version=0x01 | command | length | payload(length 字节) | CRC16(低字�
 
 ### 3.4 一条真实存在的示例帧（可直接对着核对）
 
-发：`task_id=1, class_id=2, box_id=3, pick_x_step=1200, pick_y=0, drop=0, state=1`
+发：`task_id=1, class_id=2, box_id=3, pick_x_step=0, pick_y=0, drop=0, state=1`
+（视觉坐标 0,0 → 机械 X2200 / Y3000）
 
 ```
-AA 55 01 10 11 | 01 00 02 03 | B0 04 00 00 | 00 00 00 00 | 00 00 00 00 | 01 | D6 9C
-↑帧头  ↑版本/命令/长度  task_id  class box   pick_x=0x000004B0=1200   pick_y=0     drop=0    state  CRC16
+AA 55 01 10 11 | 01 00 02 03 | 00 00 00 00 | 00 00 00 00 | 00 00 00 00 | 01 | 99 62
+↑帧头  ↑版本/命令/长度  task_id  class box   pick_x=0        pick_y=0     drop=0    state  CRC16
 ```
 
 `D6 9C` 是 CRC 低字节在前（实际值 `0x9CD6`）。
@@ -152,14 +159,33 @@ CLASS_TO_BOX = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}   # 按比赛规则填
 且 `drop_step` 在 T 轴软限位内才接受；否则直接回 `0x83 error=1`（坐标非法）。
 **建议永远发合法 box_id，drop_step 填 0。**
 
-### 4.3 `pick_x_step` / `pick_y_step`：**绝对微步**，不是像素、不是 mm
+### 4.3 `pick_x_step` / `pick_y_step`：视觉坐标（默认 mm）
 
-- 零点 = X 轴回零开关（PD6）触发后的位置，回零后 `X_POS=0`；
-- 软限位：`SORT_X_MIN_STEP=0`、`SORT_X_MAX_STEP=SORT_X_TRAVEL_STEPS=20000`
-  （`SORT_X_HOME_DIR=-1` 时是 `0 ~ +行程`），越界 → `0x83 error=1`；
-  20000 只是保守占位（≈250 mm），实测行程后要收紧，宁小勿大；
-- `SORT_ENABLE_Y_AXIS=0`（当前）时 Y 驱动器不使能，`pick_y_step`
-  只解析不校验不使用——**照发 0 即可**，等 Y 接好再改 1。
+2026-11-08 起，固件默认启用 `SORT_VISION_COORD_MAP=1`：
+
+```c
+machine_step = zero + sign * vision_coord * NUM / DEN
+```
+
+配置在 `App/sorting_config.h`：
+
+```c
+#define SORT_VISION_ZERO_X_STEP         2200
+#define SORT_VISION_ZERO_Y_STEP         3000
+#define SORT_VISION_STEPS_PER_COORD_NUM 45   /* 900 微步 / 2 cm = 45 微步/mm */
+#define SORT_VISION_STEPS_PER_COORD_DEN 1
+#define SORT_VISION_X_SIGN              (+1)
+#define SORT_VISION_Y_SIGN              (+1)
+```
+
+- 视觉零点 (0,0) 对应机械 X=2200、Y=3000 微步；
+- 默认视觉坐标单位是 **mm**；
+- 如果视觉发 cm：`NUM=450, DEN=1`；
+- 如果视觉发 0.1 mm：`NUM=45, DEN=10`；
+- 如果视觉仍发像素：先在视觉端换算成 mm，或改 NUM/DEN；
+- 视觉 X/Y 方向与机械相反时，把对应 `SIGN` 改成 `-1`；
+- 转换后仍会走 X/Y 软限位校验，越界回 `0x83 error=1`；
+- `SORT_VISION_COORD_MAP=0` 时恢复旧行为：字段必须是绝对微步。
 
 ### 4.4 `state`
 
@@ -168,10 +194,15 @@ CLASS_TO_BOX = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}   # 按比赛规则填
 
 ---
 
-## 5. 像素 → 微步：换算放在视觉端做
+## 5. 视觉端输出什么：默认直接发 mm
 
-STM32 只认微步，所以视觉必须先把“模型框中心 `(u, v)`”换算成机械坐标。
-X 轴传动链已固定：42BYGH47（200 整步/圈）× A4988 1/16 细分 = 3200 微步/圈，
+> 2026-11-08 起，推荐视觉端直接输出**相对视觉零点的 mm**，
+> STM32 用 `SORT_VISION_*` 统一换算；下面的“像素 → 微步”仅当
+> `SORT_VISION_COORD_MAP=0` 时使用。
+
+旧方案（`SORT_VISION_COORD_MAP=0`）：STM32 只认微步，视觉必须先把
+“模型框中心 `(u, v)`”换算成机械绝对微步。X 轴传动链：
+42BYGH47（200 整步/圈）× A4988 1/16 细分 = 3200 微步/圈，
 同步轮 20T、齿距 2 mm → 每圈 40 mm：
 
 ```
@@ -401,7 +432,7 @@ while True:
 | 偶尔回、偶尔丢 | 没共地 / 杜邦线过长 / 电机干扰 | 短线、共地、远离电机线 |
 | 有 ACK 但机构不动 | `ZSERVO_CALIB_MODE=1`（Z 完全不动）、`SORT_ENABLE_Y_AXIS=0`（Y 不动是正常的）、X 已在该位置 | 跑自动流程前必须把 Z 标定模式改 0 |
 | 回 BUSY | 上电还在 X→Y→T 回零，或上一条任务没做完 | 先 `status` 看到 `state=5` 再发；重试间隔 300~500 ms |
-| 回 ERROR 1 | `pick_x_step` 越界（负数或 >20000）、`box_id` 越界 | 检查像素→微步换算和零点方向；软限位见 `sorting_config.h` |
+| 回 ERROR 1 | 视觉坐标映射后的机械步数越界、`box_id` 越界 | 检查 `SORT_VISION_*` 零点/比例/方向，以及最终 X/Y 软限位 |
 | 回 ERROR 5 | 回零失败（限位开关/磁铁/方向） | 查 PD6 开关和 `SORT_X_HOME_DIR` |
 | 回 ERROR 6 | 急停按下 | 松开 PD13 后发 `0x30` 复位 |
 | 回 ERROR 9 | 位置不可信（未回零） | 发 `0x02` HOME，等 READY |

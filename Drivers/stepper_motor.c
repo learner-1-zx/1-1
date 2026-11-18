@@ -50,6 +50,19 @@ typedef struct
  * 2026-11-05 实测：Y 轴按同样的接法也会朝离开关的方向走（回零方向反了），
  * 所以 Y 的 dir_invert 同样置 1U。SORT_Y_HOME_DIR 仍保持 -1，
  * Y 坐标依旧是 0 ~ +行程；改完必须重新回零（旧位置不再可信）。 */
+/* ---------------- T 轴单独配置（X/Y 不要动） ----------------
+ * T 轴和 X/Y 共用 StepperMotor_Tick() 的代码框架，但下面三个极性
+ * 只作用于 motors[STEPPER_T]，不会影响 X/Y：
+ *   T 的 PUL/DIR/EN 三路都经过 ULN2003（反相），所以 MCU 侧：
+ *     STEP 有效 = 高（step_active_low = 0）
+ *     EN   使能 = 低（en_active_low = 1，ULN 输出开路 -> TB6600 光耦截止）
+ *   TB6600 是 B-/B+/A-/A+ 端子顺序，接电机时按
+ *   蓝 B- / 红 B+ / 绿 A- / 黑 A+ 压线。
+ * 改 T 的方向优先改 T_DIR_INVERT；不要动 X/Y 的 dir_invert。 */
+#define T_STEP_ACTIVE_LOW   0U
+#define T_DIR_INVERT        0U
+#define T_EN_ACTIVE_LOW     1U
+
 static StepperMotor_t motors[STEPPER_COUNT] =
 {
   {
@@ -68,7 +81,17 @@ static StepperMotor_t motors[STEPPER_COUNT] =
     .step_port = T_STEP_GPIO_Port, .step_pin = T_STEP_Pin,
     .dir_port = T_DIR_GPIO_Port, .dir_pin = T_DIR_Pin,
     .en_port = T_EN_GPIO_Port, .en_pin = T_EN_Pin,
-    .step_active_low = 1U, .dir_invert = 0U, .en_active_low = 1U
+    /* T 轴三路（PUL/DIR/EN）都经过 ULN2003 达林顿阵列，会反相：
+     *   MCU 高 -> ULN 输出低 -> TB6600 光耦导通；
+     *   MCU 低 -> ULN 输出开路 -> TB6600 光耦截止。
+     * 因此：
+     *   STEP 有效 = MCU 高（step_active_low = 0，与 X/Y 一致）；
+     *   TB6600 的 EN 是“脱机”输入：光耦导通=转子自由、脉冲被忽略，
+     *   所以“使能”必须让光耦截止 = MCU 低（en_active_low = 1）。
+     * 不要按“直连 TB6600 共阳”的极性去改，那会正好相反。 */
+    .step_active_low = T_STEP_ACTIVE_LOW,
+    .dir_invert = T_DIR_INVERT,
+    .en_active_low = T_EN_ACTIVE_LOW
   }
 };
 /*防止多任务或中断打断时的数据冲突*/

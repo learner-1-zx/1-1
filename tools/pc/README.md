@@ -1,3 +1,6 @@
+> 项目当前状态见根目录 [`AI_CONTEXT.md`](../../AI_CONTEXT.md)；本文件只说明串口工具。
+
+
 # 电脑串口测试（tools/pc）
 
 按键不够、接线时腾不出手按板载 KEY0~KEY3 时，可以用电脑串口代替手工按键。
@@ -11,6 +14,10 @@
 > **USART2 是留给 OpenART 摄像头的，不要和摄像头同时接。**
 > 摄像头在线时只用 USART3 控制台；要单独测 `status/home/stop/reset/mission`，
 > 先把摄像头从 PA2/PA3 断开，再接 USB-TTL，否则两个发送端会顶在同一根线上。
+>
+> ！！**`ok` / `zup` / `zero` / `zk` / `gb` / `tjog` 这些文字命令只走 USART3
+> （PB10/PB11）**。USART2（PA2/PA3）是 `AA 55 ... CRC16` 二进制视觉协议，
+> 用 ASCII 串口助手看只会是乱码，发 `ok` 也不会有文字回复。
 
 > 电平是 **3.3 V TTL**，必须用 USB-TTL（CH340/CP2102 等）并共地；
 > 不能把 RS232（±12 V）直接接到 MCU 引脚上。
@@ -25,9 +32,9 @@
 |---|---|
 | `0` `1` `2` `3` | 短按 KEY0~KEY3（保持 100 ms，超过 20 ms 消抖） |
 | `A` `B` `C` `D` | 长按 KEY0~KEY3（保持 1500 ms，KEY0 用它测“按住 1 s 存投放口 X”） |
-| `s` | 打印状态、轴位置、Z/夹爪脉宽、四个按键原始电平 |
-| `x` | 立即释放虚拟按键 |
-| `h` / `?` | 帮助 |
+| `s` | 打印状态、轴位置、Z/夹爪脉宽、四个按键原始电平（约 100 ms 后输出） |
+| `x` | 释放虚拟按键（约 100 ms 后执行） |
+| `h` / `?` | 帮助（大写 `H`/`?` 立即输出） |
 
 用任意串口助手（XCOM、SSCOM、PuTTY、VSCode Serial Monitor）发单字符即可，
 不用加回车（固件会忽略 CR/LF）。也可以用本目录脚本交互：
@@ -94,8 +101,8 @@ py -3 tools/pc/serial_tool.py -p COM6 console
 | `Y500` | Y 轴移动（`SORT_ENABLE_Y_AXIS=0` 时回 `DISABLED`；当前已启用 Y） |
 | `T3` | 转盘转到 3 号仓（1..6，按仓表单向补角） |
 | `T` | 只打印当前 T 位置 |
-| `ZT` / `ZB` / `ZM` | Z 到最上 1200 / 最下 2500 / 中间 1850 us |
-| `Z2200` | Z 到指定脉宽（1200..2500） |
+| `ZT` / `ZB` | Z 到最上 1200 / 最低工作位 2150 us（不再有 ZM） |
+| `Z2000` | Z 到指定脉宽（1200..2150） |
 | `Z` | 只打印当前 Z 脉宽 |
 | `GO` / `GC` | 夹爪张开 / 闭合（一次到位，标定模式也有效） |
 | `G1650` | 夹爪到指定脉宽（1400..1750，标定模式 800..2200） |
@@ -113,9 +120,9 @@ SEQ START X=1200
 SEQ START BIN=3
 SEQ MOVE XY + T        ← X 和转盘同时起步
 SEQ GRIP OPEN          ← X 到位后开爪
-SEQ Z DOWN US=2500     ← 350 ms 后 Z 到最下
+SEQ Z DOWN US=2150     ← 350 ms 后 Z 到最低工作位
 SEQ GRIP CLOSE
-SEQ Z UP US=1220       ← 闭爪后 Z 回运输高度
+SEQ Z UP US=1200       ← 闭爪后 Z 回最上面
 SEQ WAIT TURRET
 SEQ DONE (drop move belongs to the auto flow)
 ```
@@ -142,8 +149,64 @@ py -3 tools/pc/serial_tool.py -p COM6 console
 - **互锁**：任何指令都要求“安全 + 无自动任务”；序列运行期间视觉任务会被回 `BUSY`，
   直接运动指令会回 `REJECT SEQ BUSY`，用 `RA` 退出。
 - 全流程**不包含“移动到投放口 + 投放开爪”**，那属于正式自动流程（队友负责）。
-- `Z` 用的是 `ZSERVO_PULSE_BOTTOM_US`（2500，机械端点）和
-  `ZSERVO_PULSE_TRAVEL_US`（1220）；长时间停在 2500 会顶住齿条，测试短停即可。
+- `Z` 用的是 `ZSERVO_PULSE_BOTTOM_US`（2150，最低工作位）和
+  `ZSERVO_PULSE_TRAVEL_US`（1200，最上面）；不再使用 1850 的中间位。
+
+## 1.2 USART3 小写单词指令（全流程手动测试，2026-11-05）
+
+大写指令要记缩写、还要“发送新行”；全流程联调时更推荐直接发小写单词。
+同一个 USART3、115200 8N1，**不勾“发送新行”也能用**：最后一个字符后
+100 ms 没有新字符就自动执行；勾了“发送新行”则收到 CR/LF 立即执行。
+上电后固件先发一次 `ok`，之后每次发 `ok` 都会回一次 `ok`。
+
+| 发送 | 动作 |
+|---|---|
+| `ok` | 回显 `ok`（上电自动发一次；任何状态都回，可当心跳） |
+| `zup` | Z 轴到最上面 `ZSERVO_PULSE_TRAVEL_US`（1200 us） |
+| `zdown` | Z 轴下降到最低工作位 `ZSERVO_PULSE_GRASP_US`（2150 us） |
+| `ztop` / `zbottom` | Z 到 1200 / 2150 us（最上 / 最低工作位；无 zmid） |
+| `xmax` / `xmin` | X 到软限位上限 `SORT_X_MAX_STEP`（5400）/ 零点 `0` |
+| `ymax` / `ymin` | Y 到软限位上限 `SORT_Y_MAX_STEP`（6800）/ 零点 `0` |
+| `tjog` / `tjog-` | 转盘相对 +2000 / -2000 微步（约 ±43°；不要求先回零，查 T 驱动器/接线） |
+| `zero` | 恢复零点：READY 时重新回零；ERROR/急停松开后先清故障再回零 |
+| `zk` | 机械爪张开（同 `GO`） |
+| `gb` | 机械爪闭合（同 `GC`） |
+| `stop` | 软停止（进 ERROR，需要 `reset` 或 `zero`） |
+| `reset` | 清急停锁存并重新回零（急停仍按住时回 REJECT） |
+| `status` | 打印状态/位置/脉宽（同 `s`） |
+| `help` | 打印帮助（同 `h`） |
+| `run` | 用上次的 X/仓号跑一遍 `R` 序列；`abort` 中止 |
+| `x1200` / `y500` / `t3` / `z2200` / `g1650` | 小写数字指令，等价于 `X1200` / `Y500` / `T3` / `Z2200` / `G1650` |
+
+单字符 `0~3`、`A~D`、`s`、`h`、`x` 仍然可用（`s/h/x` 会延迟约 100 ms 执行）。
+所有动作和视觉协议共用“安全 + 无任务”门控；急停或自动任务执行期间只回
+REJECT，`ok` 不受影响。
+
+一次完整的手动取放流程示例：
+
+```text
+ok            -> ok
+zero          -> ZERO HOMING START        （等回零完成，s 看 STATE=5）
+xmax          -> X -> 5400                （X 到取料点附近，或直接 x1200）
+zk            -> G OPEN US=1730
+zdown         -> Z DOWN(GRASP) US=2150
+gb            -> G CLOSE US=1420
+zup           -> Z UP(TRAVEL) US=1200
+xmin          -> X -> 0
+```
+
+> **当前台架配置**：`SORT_XY_BENCH_MODE=1`、`SORT_XY_BENCH_KEEP_TURRET=1`，
+> 上电时 **X/Y 和 T 同时开始回零**，三轴全部完成后才进 READY。串口应依次看到
+> `XY_HOME OK ...`、`T_HOME START`、`T_HOME_PIN=`、`XY+T HOME OK -> READY`。
+>
+> - 如果没接 PD12 的 T_HOME 霍尔/磁铁，T 会等满 20 s 后进 ERROR；
+>   这时把 `SORT_XY_BENCH_KEEP_TURRET` 改回 **0**（只回 XY）。
+> - 想恢复正式流程的 X→Y→T 顺序和夹爪/Z 四键语义，把
+>   `SORT_XY_BENCH_MODE` 改回 **0**。
+> - T 位置无效时，`T3` / `R` 会回 `REJECT NOT HOMED`，视觉任务会被
+>   `SORT_ERR_NOT_READY` 拒绝；可以先用 `tjog` / `tjog-` 单独确认 T 驱动器。
+> - 自动流程还需要把 `Drivers/servo_z.h` 的 `ZSERVO_CALIB_MODE` 改成 0
+>   （否则状态机不控制 Z 高度）。
 
 ## 2. USART2 协议帧
 
@@ -156,11 +219,13 @@ py -3 tools/pc/serial_tool.py -p COM5 status
 py -3 tools/pc/serial_tool.py -p COM5 home
 py -3 tools/pc/serial_tool.py -p COM5 stop
 py -3 tools/pc/serial_tool.py -p COM5 reset
-py -3 tools/pc/serial_tool.py -p COM5 mission --id 1 --box 3 --x 1200 --y 0
+py -3 tools/pc/serial_tool.py -p COM5 mission --id 1 --box 3 --x 0 --y 0
 py -3 tools/pc/serial_tool.py -p COM5 monitor
 ```
 
-- `mission` 的取料坐标是绝对步数（X 回零后零点为 0），投放口由 STM32 自己保存；
+- 2026-11-08 起 `SORT_VISION_COORD_MAP=1`：`--x/--y` 是**视觉坐标（默认 mm，相对视觉零点）**，
+  不是绝对微步；视觉零点对应机械 X2200/Y3000，900 微步 = 2 cm；
+- 投放口固定为 X/Y 限位零点，不再由 STM32 保存任意投放坐标；
 - 回零/任务/停止/复位分别应答 `0x86/0x80/0x82/0x85`，出错是 `0x83` 并带错误码；
 - 不接硬件也能先跑帧自检：
 

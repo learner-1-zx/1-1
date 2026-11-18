@@ -22,11 +22,30 @@
  * 命令（单字符，直接用串口助手“发送”即可，不用加回车）：
  *   0 1 2 3  短按 KEY0~KEY3（100 ms，够 20 ms 消抖、短于 1 s 长按）
  *   A B C D  长按 KEY0~KEY3（1500 ms，> 1 s，可测投放口长按保存）
- *   x        立即释放全部虚拟按键
+ *   x        释放全部虚拟按键（小写单词缓冲，约 100 ms 空闲后执行）
  *   s        打印状态、轴位置、Z/夹爪脉宽、四个按键的原始电平
  *   h 或 ?   打印帮助
  * 按键动作仍受“安全 + 无任务”门控：任务执行期间按 0~3 不会动作，
- * 与真实按键完全一致（这时可以按 s 看 STATE 判断卡在哪一步）。 */
+ * 与真实按键完全一致（这时可以按 s 看 STATE 判断卡在哪一步）。
+ *
+ * 2026-11-05 新增“小写单词指令”（全流程联调用，解析在 bench_motion.c）：
+ *   ok        回显 ok（上电时固件也会自动发一次 ok）
+ *   zup        Z 到最上 1200 us
+ *   zdown      Z 到最低工作位 2150 us
+ *   ztop / zbottom        Z 到 1200 / 2150 us（最上 / 最低工作位）
+ *   xmax / xmin              X 到软限位上限 / 零点 0
+ *   ymax / ymin              Y 到软限位上限 / 零点 0
+ *   tjog / tjog-             转盘相对 +2000 / -2000 微步（不要求先回零，查 T 驱动器）
+ *   zero      恢复零点：READY 时重新回零；ERROR/急停松开后先复位再回零
+ *   zk        机械爪张开（同 GO）
+ *   gb        机械爪闭合（同 GC）
+ *   stop      软停止（进 ERROR，需 reset/zero）
+ *   reset     清除急停锁存并重新回零（急停仍按下时拒绝）
+ *   status    打印状态（同 s）
+ *   run       用上次的 X / 仓号跑一遍 R 序列
+ *   abort     中止 R 序列
+ *   x1200 / y500 / t3 / z2200 / g1650   小写数字指令，等价于大写版本
+ *   单词之间可用回车/换行结束；不发送换行时，100 ms 内没有新字符也会自动执行。 */
 
 #define BENCH_CONSOLE_KEY_COUNT    4U
 /* 短按保持时间：必须大于 SORT_BENCH_KEY_DEBOUNCE_MS（20 ms），
@@ -54,5 +73,12 @@ void BenchConsole_FeedByte(uint8_t byte);
  * *pressed = 1 表示“逻辑按下”（对应 GPIO 低电平）。
  * index 越界或没有注入时返回 0，调用方应回退到 HAL_GPIO_ReadPin()。 */
 uint8_t BenchConsole_GetVirtualKey(uint8_t index, uint8_t *pressed);
+
+/* 下面三个是给小写单词指令（bench_motion.c）复用的公开入口，
+ * 保证 "status" / "help" / "x" 和单字符 's' / 'h' / 'x' 输出完全一致。
+ * BENCH_CONSOLE_NO_STATUS=1（主机仿真）时 PrintStatus 为空操作。 */
+void BenchConsole_PrintStatus(void);
+void BenchConsole_PrintHelp(void);
+void BenchConsole_ReleaseKeys(void);
 
 #endif /* __BENCH_CONSOLE_H */

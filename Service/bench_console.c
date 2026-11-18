@@ -116,6 +116,13 @@ static void Console_PrintStatus(void)
                      (int32_t)StepperMotor_IsPositionValid(STEPPER_Y));
   DebugUart_WriteInt("Y_BUSY=", (int32_t)StepperMotor_IsBusy(STEPPER_Y));
   DebugUart_WriteInt("T_POS=", StepperMotor_GetPosition(STEPPER_T));
+  DebugUart_WriteInt("T_POS_OK=",
+                     (int32_t)StepperMotor_IsPositionValid(STEPPER_T));
+  DebugUart_WriteInt("T_BUSY=", (int32_t)StepperMotor_IsBusy(STEPPER_T));
+  /* T_HOME 霍尔：0 = 低（有磁铁/已触发），1 = 高（未触发）。 */
+  DebugUart_WriteInt("T_HOME=",
+                     (HAL_GPIO_ReadPin(T_HOME_GPIO_Port, T_HOME_Pin) ==
+                      GPIO_PIN_RESET) ? 0 : 1);
   DebugUart_WriteInt("Z_US=", (int32_t)ZServo_GetPulse());
   DebugUart_WriteInt("GRIP_US=", (int32_t)ServoGripper_GetPulse());
   DebugUart_WriteInt("GRIP_CLOSED=", (int32_t)ServoGripper_IsClosed());
@@ -177,19 +184,16 @@ static void Console_Execute(uint8_t command)
   {
     case (uint8_t)'x':
     case (uint8_t)'X':
-      Console_ReleaseAll();
-      DebugUart_Write("RELEASE ALL\r\n");
+      BenchConsole_ReleaseKeys();
       break;
     case (uint8_t)'s':
     case (uint8_t)'S':
-#if !BENCH_CONSOLE_NO_STATUS
-      Console_PrintStatus();
-#endif
+      BenchConsole_PrintStatus();
       break;
     case (uint8_t)'h':
     case (uint8_t)'H':
     case (uint8_t)'?':
-      Console_PrintHelp();
+      BenchConsole_PrintHelp();
       break;
     /* 串口助手常把回车/换行一起发出来，直接忽略。 */
     case (uint8_t)'\r':
@@ -203,6 +207,24 @@ static void Console_Execute(uint8_t command)
   }
 }
 
+void BenchConsole_PrintStatus(void)
+{
+#if !BENCH_CONSOLE_NO_STATUS
+  Console_PrintStatus();
+#endif
+}
+
+void BenchConsole_PrintHelp(void)
+{
+  Console_PrintHelp();
+}
+
+void BenchConsole_ReleaseKeys(void)
+{
+  Console_ReleaseAll();
+  DebugUart_Write("RELEASE ALL\r\n");
+}
+
 void BenchConsole_Init(void)
 {
   rx_write = 0U;
@@ -212,7 +234,12 @@ void BenchConsole_Init(void)
   BenchMotion_Init();
 #endif
   (void)HAL_UART_Receive_IT(&huart3, &rx_byte, 1);
+  /* 上电握手：电脑端收到 "ok" 就说明 MCU 已经跑过外设初始化、
+   * USART3 收发都通了。之后每次收到单词 ok 也会原样回一次。 */
+  DebugUart_Write("ok\r\n");
   DebugUart_Write("\r\nBENCH CONSOLE READY (h = help)\r\n");
+  /* 版本标记：确认烧录的是“X/Y 与 T 并行回零 + ULN2003 极性修正”的新固件。 */
+  DebugUart_Write("FW=2026-11-08 T-PARALLEL ULN2003\r\n");
 }
 
 void BenchConsole_RxComplete(void)
@@ -233,8 +260,9 @@ void BenchConsole_Process(void)
   while (Console_ReadByte(&value))
   {
 #if SORT_BENCH_MOTION
-    /* 大写字母开头的运动指令先解析（X/Y/T/Z/G/R）；
-     * 不认识的字符（0~3 按键、A~D 长按、s/h 等）交回按键控制台。 */
+    /* 运动指令先解析：大写 X/Y/T/Z/G/R 走“一行一条”，
+     * 小写单词（zup/xmax/zero/zk/gb/ok...）走单词缓冲。
+     * 0~3 按键、A~D 长按等未被消费的字符交回按键控制台。 */
     if (BenchMotion_HandleByte(value) != 0U)
     {
       continue;

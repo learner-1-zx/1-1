@@ -64,6 +64,10 @@ void SortingTask_Init(void);
 void SortingTask_Process(void);
 /* 仅在 READY、安全且没有未完成任务时接收任务，成功返回 1。 */
 uint8_t SortingTask_Submit(const SortMission_t *mission);
+/* 把视觉坐标转换成 X/Y 绝对微步（SORT_VISION_* 配置）。
+ * protocol 层在 Submit 之前调用；mission 里的 pick_x_step/pick_y_step
+ * 在线上仍然叫 step，但启用 SORT_VISION_COORD_MAP 后含义是视觉坐标。 */
+void SortingTask_MapVisionMission(SortMission_t *mission);
 /* 软停止：停止所有轴并保持夹爪当前状态，进入 ERROR 等待复位。
  * 不会主动开爪，避免半空掉落物块。 */
 void SortingTask_Stop(void);

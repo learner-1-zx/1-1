@@ -13,7 +13,7 @@
 
 /* 台架 Z 轴按键（KEY2/KEY3）：1 = 控 Z（当前）；0 = 不控 Z，可改用 X 点动。
  * 与 servo_z.h 的 ZSERVO_BENCH_KEY2/3_JUMP 配合：
- *   ZSERVO_BENCH_KEY2/3_JUMP = 1 → KEY2 一键到最下 2500 us、KEY3 一键到最上 1200 us；
+ *   ZSERVO_BENCH_KEY2/3_JUMP = 1 → KEY2 一键到最低工作位 2150 us、KEY3 一键到最上 1200 us；
  *   = 0 → 每次 ±ZSERVO_STEP_US（50 us），按住连发。
  * X 调试时把本项置 0、SORT_BENCH_KEY_X_JOG 置 1。
  * 正式比赛 SORT_ENABLE_BENCH_KEYS=0 时整段不编译。 */
@@ -27,6 +27,12 @@
 /* 台架按键（KEY0/KEY1 夹爪，KEY2/KEY3 Z 轴或 X 轴）只在安全且无任务时生效。
  * 正式比赛必须改为 0，彻底关闭手动入口。 */
 #define SORT_ENABLE_BENCH_KEYS          1
+
+/* T 轴上电回零排查：KEY0 停止自动回零，KEY1/KEY2 分别点动 T 正/反向。
+ * KEY3 保留原台架功能；确认 T 轴链路后恢复为 0。 */
+#define SORT_T_BENCH_KEY_DIAGNOSTIC     1
+#define SORT_T_BENCH_KEY_SPEED_STEPS_S  600U
+#define SORT_T_BENCH_KEY_STEPS          2000
 
 /* 台架按键动作方式（KEY0 = 张开方向/脉宽增大，KEY1 = 闭合方向/脉宽减小）：
  * 1 = 按下一次直接跳到开/合位，视觉未就绪时手动模拟夹爪状态（当前）；
@@ -51,8 +57,8 @@
 /* 标定模式（SORT_BENCH_KEY_JUMP = 0）下按住 KEY1 连续点动：
  * 首次按下立即走一步，之后每 REPEAT_MS 再走一步，松手即停。
  * 50 us/步 × 7 步 ≈ 1 s 走完 350 us 行程；嫌太快就加大到 200~250 ms。
- * 投放口标定（SORT_XY_CALIB_MODE=1，当前）下 KEY0 不连发：按下即开爪，
- * 长按满 SORT_DROP_KEY_LONG_PRESS_MS 才存投放口 X，连发会重置长按计时。
+ * 投放口标定（SORT_XY_CALIB_MODE=0，当前已关闭）：KEY0/KEY1 正常工作，
+ * 不再用长按保存投放口坐标；投放口固定为 X/Y 限位零点 0/0。
  * Z 轴逐档（SORT_BENCH_KEY_Z_SERVO=1 且 ZSERVO_BENCH_KEY2/3_JUMP=0）
  * 沿用同一节拍：KEY2/KEY3 每 REPEAT_MS 走一步 ZSERVO_STEP_US（50 us）。
  * Z 轴一键到位（ZSERVO_BENCH_KEY2/3_JUMP=1，当前）只在按下沿走一次。 */
@@ -198,9 +204,12 @@
  * 故意大于任何可能行程，正负对称。 */
 #define SORT_XY_BENCH_POS_LIMIT         200000
 
-/* 1 = 台架模式 XY 回零完成后继续做 T 轴回零（T_HOME 霍尔已接好时用）；
- * 0 = 只回 XY，完成即 READY（当前，先单独调 XY，不接 T 也不会卡 20 s 超时）。 */
-#define SORT_XY_BENCH_KEEP_TURRET       0
+/* 1 = 台架模式下 X/Y 与 T 轴 **同时**回零（T_HOME 霍尔已接好时用）：
+ *     X/Y 两个 Jog 启动后立刻启动 T 的 Jog，各轴独立走三段；
+ *     任一轴失败整体进 ERROR，全部完成才进 READY。
+ * 0 = 只回 XY，完成即 READY（先单独调 XY、不接 T 时不卡 20 s 超时）。
+ * 2026-11-08：全流程测试需要转盘零点，当前改为 1； */
+#define SORT_XY_BENCH_KEEP_TURRET       1
 
 #if (SORT_XY_BENCH_MODE != 0) && (SORT_ENABLE_Y_AXIS == 0)
 #error "SORT_XY_BENCH_MODE=1 requires SORT_ENABLE_Y_AXIS=1 (X and Y together)"
@@ -212,14 +221,37 @@
 
 /* ---------------- 取放位置（绝对步数，待标定） ---------------- */
 
-/* 固定投放口：夹爪把物块送到这里，转盘把目标仓转到其下方。
- * 坐标以 X/Y 回零后的零点为 0，由 STM32 自己保存，不走上位机；
- * 上位机只发送物块（取料）位置 pick_x_step / pick_y_step。
- * 标定方法（SORT_XY_CALIB_MODE=1）：回零后用 KEY2/KEY3 慢速点动 X
- * 到投放口，按 KEY0 存成投放 X（USART3 打印 DROP_X=...），
- * 再把打印出来的数写回这里，长期生效。 */
+/* 固定投放口 = X/Y 限位零点，固定为 0/0。
+ * 不再用“把当前位置存成投放坐标”的标记方法：回零流程必须真实触发
+ * X/Y 限位开关（SORT_XY_HOMING_APPROACH 的二次触发边沿），
+ * 该边沿定义为 0 点，投放点直接使用这个 0 点，减少软件标记误差。 */
 #define SORT_DROP_X_STEP                0
 #define SORT_DROP_Y_STEP                0
+
+/* ---------------- 视觉坐标 → 机械微步（2026-11-08 标定） ----------------
+ * 视觉零点对应机械坐标：X = 2200 微步，Y = 3000 微步。
+ * 实测 900 微步 = 2 cm，即 450 微步/cm = 45 微步/mm。
+ *
+ * 变换公式：
+ *   machine_step = zero + sign * coord * NUM / DEN
+ *
+ * 当前按“视觉坐标单位 = mm”配置（NUM=45, DEN=1）。
+ *   - 如果视觉发的是 cm：NUM=450, DEN=1
+ *   - 如果视觉发的是 0.1 mm：NUM=45, DEN=10
+ *   - 如果视觉仍发像素：先按标定矩阵换算成 mm，再改 NUM/DEN
+ * sign 用于视觉坐标轴方向与机械轴相反时取 -1。
+ */
+#define SORT_VISION_COORD_MAP           1
+#define SORT_VISION_ZERO_X_STEP         2200
+#define SORT_VISION_ZERO_Y_STEP         3000
+#define SORT_VISION_STEPS_PER_COORD_NUM 45
+#define SORT_VISION_STEPS_PER_COORD_DEN 1
+#define SORT_VISION_X_SIGN              (+1)
+#define SORT_VISION_Y_SIGN              (+1)
+
+#if (SORT_VISION_COORD_MAP != 0) && (SORT_VISION_STEPS_PER_COORD_DEN == 0)
+#error "SORT_VISION_STEPS_PER_COORD_DEN must not be 0"
+#endif
 
 /* 任务完成后的停车位；设为 0/0 表示回到原点上方。 */
 #define SORT_PARK_X_STEP                0
@@ -348,18 +380,21 @@
 #define SORT_T_MIN_STEP                 (-(3 * SORT_T_STEPS_PER_REV))
 #define SORT_T_MAX_STEP                 (3 * SORT_T_STEPS_PER_REV)
 
-/* 15 rpm 左右：16640 * 15 / 60 ≈ 4160 步/秒，先取 4000（14.4 rpm）。
- * 6 仓换一次约 0.7 s，加减速约 0.2 s；若起步丢步/异响，先把
- * SORT_T_ACCEL_STEPS_S2 降到 10000 或把最大速度降到 3000。 */
-#define SORT_T_MAX_SPEED_STEPS_S        4000U
-#define SORT_T_ACCEL_STEPS_S2           20000U
-/* 回零搜索 2000 步/秒 ≈ 7.2 rpm（一圈 8.3 s）；慢速接近 300 步/秒
- * ≈ 1.1 rpm，触发点重复性更好。 */
-#define SORT_T_HOME_SPEED_STEPS_S       2000U
-#define SORT_T_HOME_APPROACH_SPEED_STEPS_S 300U
+/* 15 rpm 左右：16640 * 15 / 60 ≈ 4160 步/秒，但旧转盘测试
+ * `TURNTABLE_TEST_2026-10-12.md` 实测只验证到 1200 steps/s 稳定；
+ * 2026-11-08 先按旧测试的上限恢复：最高 1200、加速度 1250
+ * （旧测试 25 steps/s 每 20 ms = 1250 steps/s²），
+ * 确认方向、相序、霍尔都正常后再逐步加回 2000~4000。 */
+#define SORT_T_MAX_SPEED_STEPS_S        1200U
+#define SORT_T_ACCEL_STEPS_S2           1250U
+/* 回零搜索 800 步/秒（一圈约 20.8 s，超过 20 s 超时），
+ * 所以回零单独用 1000 步/秒（一圈约 16.6 s），仍在 20 s 内；
+ * 慢速接近 200 步/秒，触发点重复性更好，也不容易冲过磁铁。 */
+#define SORT_T_HOME_SPEED_STEPS_S       1000U
+#define SORT_T_HOME_APPROACH_SPEED_STEPS_S 200U
 /* 退让速度：搜索触发后反向走到霍尔释放，不再用固定步数，
  * 因此磁铁有效宽度 W 不需要测量，换磁铁也不用改参数。 */
-#define SORT_T_HOME_BACKOFF_SPEED_STEPS_S 600U
+#define SORT_T_HOME_BACKOFF_SPEED_STEPS_S 400U
 #define SORT_T_HOME_TIMEOUT_MS          20000U
 #define SORT_T_HOME_DEBOUNCE_MS         10U
 
@@ -385,10 +420,12 @@
  *     KEY2/KEY3 每次只走 SORT_CALIB_JOG_STEPS（慢速点动）。
  * 0 = 恢复 KEY0/KEY1 控制夹爪（按下即到开/合位）、KEY2/KEY3 整圈点动。
  * 标定值只存在 RAM，掉电丢失；长期值要写回 SORT_DROP_X_STEP/Y_STEP。
- * ！！SORT_BENCH_KEY_Z_SERVO = 1（当前）时 KEY2/KEY3 被 Z 轴占用，
- *    这里的 X 慢速点动不生效；调 X 时把 Z_SERVO 置 0、X_JOG 置 1。
- *    KEY0 的“短按开爪 + 长按存投放口”仍然有效。 */
-#define SORT_XY_CALIB_MODE              1
+ *
+ * 2026-11-08：不再使用“当前位置存成投放坐标”的标记方法。
+ * 投放口固定为 X/Y 限位零点 0/0，零点由回零时的限位开关二次触发边沿
+ * 建立，因此本项改为 0，关闭 KEY0/KEY1 的保存投放口功能。
+ * ！！SORT_BENCH_KEY_Z_SERVO = 1（当前）时 KEY2/KEY3 被 Z 轴占用。 */
+#define SORT_XY_CALIB_MODE              0
 #define SORT_CALIB_JOG_STEPS            100
 #define SORT_CALIB_JOG_SPEED_STEPS_S    300U
 
@@ -401,15 +438,13 @@
 /* ---------------- Z 轴台架模式（2026-10-27 标定完成） ---------------- */
 
 /* 驱动开关在 Drivers/servo_z.h：
- *   - ZSERVO_CALIB_MODE = 1（当前）：台架手动——上电停在 1850 us（行程中点），
- *     Travel/Approach/Grasp 不改脉宽（视觉未就绪，不跑全流程）；
- *     = 0：正式——上电到运输位 1220 us，自动流程正常控制 Z。
- *   - ZSERVO_BENCH_KEY2/3_JUMP = 1（当前）：KEY2 一键到最下 2500 us、
- *     KEY3 一键到最上 1200 us（实测端点），按下沿一次、不连发；
+ *   - ZSERVO_CALIB_MODE = 0（当前）：正式——上电到最上面 1200 us，
+ *     自动流程正常控制 Z；不再使用 1850 us 的中间高度。
+ *   - ZSERVO_BENCH_KEY2/3_JUMP = 1（当前）：KEY2 一键到最低工作位 2150 us、
+ *     KEY3 一键到最上 1200 us，按下沿一次、不连发；
  *     = 0：每次 ±ZSERVO_STEP_US（50 us），按住连发。
- *   - 实测行程 1200~2500 us，限幅同值；工作高度占位 1220/1850/2480。
- * ！！端点 1200/2500 是机械临界，别长时间停住；自动流程用 1220/2480。
- * ！！视觉联调通过、跑自动流程时把 ZSERVO_CALIB_MODE 改 0。 */
+ *   - 工作窗口 1200~2150 us；TRAVEL=1200、APPROACH=1200、GRASP=2150。
+ * ！！上电即 ztop(1200)，Z 下降到最低 2150。 */
 
 /* 1 = 用 USART3（PB10/PB11，115200）打印回零结果、失败码和标定步数；
  * 正式比赛可以改 0，彻底去掉调试串口输出和对应代码。 */
@@ -431,22 +466,34 @@
 #define SORT_DEBUG_CONSOLE              1
 
 /* 1 = 打开 USART3 台架“运动指令”（需要 SORT_DEBUG_CONSOLE=1，共用同一个串口）：
+ *   -- 小写单词（2026-11-05，全流程联调推荐；回车/换行或 100 ms 空闲结尾）--
+ *   ok       回显 ok（上电也会自动发一次 ok）
+ *   zup       Z 到最上 1200 us；zdown = Z 到最低工作位 2150 us
+ *   ztop/zbottom  Z 到 1200/2150 us（最上/最低工作位，不再有 zmid）
+ *   xmax/xmin  X 到软限位上限 / 零点；ymax/ymin 同理
+ *   tjog/tjog- 转盘相对 +2000/-2000 微步（不要求先回零，查 T 驱动器/接线）
+ *   zero     恢复零点（READY 重新回零；ERROR/急停松开后先复位再回零）
+ *   zk/gb    夹爪张开 / 闭合（等价 GO/GC）
+ *   stop/reset/status/help；run/abort 跑或中止 R 序列
+ *   x1200/y500/t3/z2000/g1650  小写数字指令，等价于大写版本
+ *   -- 大写一行一条（需要回车/换行）--
  *   X<步数>  移动 X（绝对微步，0..SORT_X_TRAVEL_STEPS）；X 单独发送 = 打印位置
  *   Y<步数>  移动 Y（SORT_ENABLE_Y_AXIS=0 时提示 DISABLED）
  *   T<1..6>  转盘到指定仓；T 单独发送 = 打印位置
- *   ZT/ZB/ZM Z 到最上 1200 / 最下 2500 / 中间 1850 us；Z<脉宽> 指定脉宽
+ *   ZT/ZB    Z 到最上 1200 / 最低工作位 2150 us；Z<脉宽> 指定脉宽（1200..2150）
  *   GO/GC    夹爪张开/闭合；G<脉宽> 指定脉宽
  *   R / R<步数> / R<步数>,<仓> / RA
  *            跑一遍“X+转盘 → 开爪 → Z 向下 → 闭爪 → Z 上升 → 等转盘”，RA 中止
- *   ！运动指令是“一行一条”，必须以回车/换行结束（串口助手勾选“发送新行”）；
- *     单字符按键 0~3 / A~D / s / h / x 不需要回车。
+ *   ！单字符按键 0~3 / A~D / s / h / x 仍然可用。
  * 全部直接调用正式驱动（StepperMotor / ZServo / ServoGripper），不经过状态机，
  * 所以不会和 sorting_task.c 抢逻辑；但序列运行期间 Protocol 会回 BUSY 拒收视觉任务。
  * 与 USART2 视觉协议无关：摄像头照常接 PA2/PA3。正式比赛置 0。 */
 #define SORT_BENCH_MOTION               1
 
-/* box_id 不在 1..6 时，是否允许退回使用协议里的 drop_step。 */
-#define SORT_T_ALLOW_DROP_STEP_FALLBACK 1
+/* box_id 不在 1..6 时，是否允许退回使用协议里的 drop_step。
+ * 2026-11-08：投放点固定为 X/Y 限位零点，drop_step 不再参与；
+ * 置 0，box_id 非法直接拒收，避免把视觉坐标误当 T 轴步数。 */
+#define SORT_T_ALLOW_DROP_STEP_FALLBACK 0
 
 /* ---------------- 动作等待时间（单位 ms，待实测） ---------------- */
 
